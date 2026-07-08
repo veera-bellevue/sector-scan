@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Submit Top Holdings — Sector Scan</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #12161f;
+    --panel-border: #1f2530;
+    --ink: #e6e9ef;
+    --ink-dim: #8891a3;
+    --accent: #4fd1a5;
+    --danger: #e2607a;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    --sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    padding: 40px 20px;
+    display: flex;
+    justify-content: center;
+  }
+  .card {
+    max-width: 460px;
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-dim);
+  }
+  h1 { font-size: 22px; margin: 6px 0 4px; }
+  p.help { color: var(--ink-dim); font-size: 13px; margin-bottom: 24px; }
+
+  label {
+    display: block;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-dim);
+    margin-bottom: 6px;
+    margin-top: 18px;
+  }
+  select, input {
+    width: 100%;
+    background: #0e1219;
+    border: 1px solid var(--panel-border);
+    color: var(--ink);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-family: var(--mono);
+    font-size: 14px;
+  }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+
+  .holding-row { display: flex; gap: 10px; margin-bottom: 10px; }
+  .holding-row .rank {
+    width: 22px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+  }
+  .holding-row input.ticker-input { flex: 2; }
+  .holding-row input.weight-input { flex: 1; }
+
+  button {
+    margin-top: 24px;
+    width: 100%;
+    background: var(--accent);
+    color: #06110d;
+    border: none;
+    padding: 12px;
+    border-radius: 8px;
+    font-weight: 650;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .status { margin-top: 16px; font-family: var(--mono); font-size: 13px; }
+  .status.ok { color: var(--accent); }
+  .status.err { color: var(--danger); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="eyebrow">Sector Scan</div>
+  <h1>Submit top 5 holdings</h1>
+  <p class="help">
+    Enter the top 5 holdings (by weight) for the ETF you were emailed about.
+    The next scheduled run will pick this up automatically and score these
+    stocks.
+  </p>
+
+  <label for="etf">ETF</label>
+  <select id="etf">
+    <option value="VDE">VDE — Energy</option>
+    <option value="VGT">VGT — Technology</option>
+    <option value="VHT">VHT — Healthcare</option>
+    <option value="VPU">VPU — Utilities</option>
+    <option value="VIS">VIS — Industrials</option>
+    <option value="VAW">VAW — Materials</option>
+    <option value="IYF">IYF — Financials</option>
+    <option value="IYC">IYC — Consumer Discretionary</option>
+    <option value="IYK">IYK — Consumer Staples</option>
+  </select>
+
+  <label>Top 5 holdings (ticker + weight %)</label>
+  <div class="holding-row">
+    <span class="rank">1</span>
+    <input id="h1" class="ticker-input" placeholder="Ticker e.g. PG" maxlength="8" />
+    <input id="w1" class="weight-input" placeholder="wt % e.g. 13.7" type="number" step="0.1" />
+  </div>
+  <div class="holding-row">
+    <span class="rank">2</span>
+    <input id="h2" class="ticker-input" placeholder="Ticker e.g. KO" maxlength="8" />
+    <input id="w2" class="weight-input" placeholder="wt % e.g. 12.3" type="number" step="0.1" />
+  </div>
+  <div class="holding-row">
+    <span class="rank">3</span>
+    <input id="h3" class="ticker-input" placeholder="Ticker e.g. PM" maxlength="8" />
+    <input id="w3" class="weight-input" placeholder="wt % e.g. 10.8" type="number" step="0.1" />
+  </div>
+  <div class="holding-row">
+    <span class="rank">4</span>
+    <input id="h4" class="ticker-input" placeholder="Ticker" maxlength="8" />
+    <input id="w4" class="weight-input" placeholder="wt %" type="number" step="0.1" />
+  </div>
+  <div class="holding-row">
+    <span class="rank">5</span>
+    <input id="h5" class="ticker-input" placeholder="Ticker" maxlength="8" />
+    <input id="w5" class="weight-input" placeholder="wt %" type="number" step="0.1" />
+  </div>
+  <p class="help" style="margin-top:6px; margin-bottom: 0;">
+    Weight % is optional but recommended — it's what lets the scanner detect
+    when a holding's size changes between submissions (e.g. after an earnings
+    miss or a rebalance).
+  </p>
+
+
+  <button id="submit-btn">Submit</button>
+  <div class="status" id="status"></div>
+</div>
+
+<script>
+  // --- Fill these in with your Supabase project's URL + anon (public) key ---
+  const SUPABASE_URL = "YOUR_SUPABASE_URL";
+  const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("submit-btn");
+
+  // Pre-select the ETF if linked with ?etf=IYK
+  const params = new URLSearchParams(window.location.search);
+  const preselect = params.get("etf");
+  if (preselect) {
+    const sel = document.getElementById("etf");
+    if ([...sel.options].some(o => o.value === preselect)) sel.value = preselect;
+  }
+
+  btn.addEventListener("click", async () => {
+    const etf = document.getElementById("etf").value;
+    const slots = ["1", "2", "3", "4", "5"].map(n => ({
+      ticker: document.getElementById("h" + n).value.trim().toUpperCase(),
+      weight: document.getElementById("w" + n).value.trim(),
+    })).filter(s => s.ticker);
+
+    if (slots.length !== 5) {
+      statusEl.textContent = "Please enter all 5 tickers.";
+      statusEl.className = "status err";
+      return;
+    }
+    for (const s of slots) {
+      if (s.weight !== "" && (isNaN(s.weight) || s.weight < 0 || s.weight > 100)) {
+        statusEl.textContent = `Weight for ${s.ticker} must be a number between 0 and 100.`;
+        statusEl.className = "status err";
+        return;
+      }
+    }
+
+    btn.disabled = true;
+    statusEl.textContent = "Submitting…";
+    statusEl.className = "status";
+
+    const batchId = crypto.randomUUID();
+    const rows = slots.map((s, i) => ({
+      etf_ticker: etf,
+      holding_ticker: s.ticker,
+      rank: i + 1,
+      weight_pct: s.weight === "" ? null : parseFloat(s.weight),
+      batch_id: batchId,
+    }));
+
+    const { error } = await sb.from("top_holdings").insert(rows);
+
+    btn.disabled = false;
+    if (error) {
+      statusEl.textContent = "Something went wrong: " + error.message;
+      statusEl.className = "status err";
+    } else {
+      const summary = slots.map(s => s.ticker + (s.weight ? ` (${s.weight}%)` : "")).join(", ");
+      statusEl.textContent = `Saved. ${etf} will be scored using ${summary} on the next run.`;
+      statusEl.className = "status ok";
+      ["h1", "w1", "h2", "w2", "h3", "w3", "h4", "w4", "h5", "w5"].forEach(id => document.getElementById(id).value = "");
+    }
+  });
+</script>
+</body>
+</html>

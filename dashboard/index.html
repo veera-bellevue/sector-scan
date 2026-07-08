@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sector Rotation Scan</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #12161f;
+    --panel-border: #1f2530;
+    --ink: #e6e9ef;
+    --ink-dim: #8891a3;
+    --accent: #4fd1a5;   /* leading / bull */
+    --warn: #f2b84b;     /* stalling / mixed */
+    --danger: #e2607a;   /* lagging / bear */
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    --sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    padding: 32px 20px 80px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+
+  header { margin-bottom: 28px; }
+  header .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+  }
+  header h1 {
+    font-size: 28px;
+    margin: 6px 0 4px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  header .subtitle { color: var(--ink-dim); font-size: 14px; }
+
+  .regime-banner {
+    border: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, #151a24, #10141c);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .regime-label {
+    font-size: 20px;
+    font-weight: 650;
+  }
+  .regime-notes {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-dim);
+    max-width: 520px;
+  }
+  .regime-stats {
+    display: flex;
+    gap: 22px;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .regime-stats div span.num { display:block; font-size: 20px; color: var(--ink); }
+  .regime-stats div span.lbl { color: var(--ink-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+
+  section { margin-bottom: 34px; }
+  section h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-dim);
+    font-weight: 600;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--panel-border);
+    padding-bottom: 8px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-dim);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  td {
+    padding: 10px 10px;
+    border-bottom: 1px solid #191d27;
+    font-family: var(--mono);
+  }
+  tr:hover td { background: #10141d; }
+  td.ticker { font-family: var(--sans); font-weight: 650; color: var(--ink); }
+  td.right { text-align: right; }
+
+  .pill {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+  .pill.leading, .pill.bull { background: rgba(79,209,165,0.15); color: var(--accent); }
+  .pill.stalling, .pill.mixed { background: rgba(242,184,75,0.15); color: var(--warn); }
+  .pill.lagging, .pill.bear { background: rgba(226,96,122,0.15); color: var(--danger); }
+
+  .composite-bar {
+    width: 60px;
+    height: 6px;
+    background: #1b2029;
+    border-radius: 4px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  .composite-bar > div { height: 100%; background: var(--accent); }
+
+  footer {
+    margin-top: 40px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--panel-border);
+    padding-top: 16px;
+  }
+  .state-msg { font-family: var(--mono); color: var(--ink-dim); font-size: 13px; padding: 20px 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Automated · Runs weekdays after market close</div>
+    <h1>Sector Rotation Scan</h1>
+    <div class="subtitle" id="run-ts">Loading latest run…</div>
+  </header>
+
+  <div class="regime-banner" id="regime-banner">
+    <div>
+      <div class="regime-label" id="regime-label">—</div>
+      <div class="regime-notes" id="regime-notes"></div>
+    </div>
+    <div class="regime-stats">
+      <div><span class="num" id="pct-leading">—</span><span class="lbl">% Leading</span></div>
+      <div><span class="num" id="pct-lagging">—</span><span class="lbl">% Lagging</span></div>
+      <div><span class="num" id="spy-rsi">—</span><span class="lbl">SPY RSI</span></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Sector ETFs</h2>
+    <table>
+      <thead>
+        <tr><th>Ticker</th><th>Sector</th><th class="right">Price</th><th class="right">RSI</th><th>Trend</th><th>Classification</th><th class="right">Rel. RSI</th><th>vs SPY</th></tr>
+      </thead>
+      <tbody id="sector-rows"><tr><td colspan="8" class="state-msg">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Holdings Weight Changes</h2>
+    <table>
+      <thead>
+        <tr><th>ETF</th><th>Holding</th><th>Change</th><th class="right">Previous</th><th class="right">New</th><th class="right">Delta</th></tr>
+      </thead>
+      <tbody id="weight-change-rows"><tr><td colspan="6" class="state-msg">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Constituent Stocks — Ranked</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Ticker</th><th>Sector</th><th class="right">Price</th>
+          <th class="right">RSI</th><th>Trend</th><th class="right">P/E</th>
+          <th class="right">Fwd P/E</th><th>Composite</th>
+        </tr>
+      </thead>
+      <tbody id="stock-rows"><tr><td colspan="9" class="state-msg">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <footer>
+    Data via yfinance, scored by a rules-based composite (technical + valuation + pattern reliability).
+    This is not financial advice — it's a decision-support framework. Full source at the project repo.
+  </footer>
+</div>
+
+<script>
+  // --- Fill these in with your Supabase project's URL + anon (public) key ---
+  const SUPABASE_URL = "YOUR_SUPABASE_URL";
+  const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  function pillClass(text) {
+    return (text || "").toLowerCase();
+  }
+
+  async function load() {
+    // 1. latest run
+    const { data: runs, error: runErr } = await sb
+      .from("runs")
+      .select("id, run_ts")
+      .order("run_ts", { ascending: false })
+      .limit(1);
+
+    if (runErr || !runs || runs.length === 0) {
+      document.getElementById("run-ts").textContent = "No runs found yet — trigger the GitHub Action or run scan.py locally.";
+      return;
+    }
+    const runId = runs[0].id;
+    document.getElementById("run-ts").textContent =
+      "Latest run: " + new Date(runs[0].run_ts).toLocaleString();
+
+    // 2. regime summary
+    const { data: regime } = await sb
+      .from("regime_summary")
+      .select("*")
+      .eq("run_id", runId)
+      .limit(1);
+
+    if (regime && regime.length) {
+      const r = regime[0];
+      document.getElementById("regime-label").textContent = r.label;
+      document.getElementById("regime-notes").textContent = r.notes;
+      document.getElementById("pct-leading").textContent = r.pct_leading + "%";
+      document.getElementById("pct-lagging").textContent = r.pct_lagging + "%";
+      document.getElementById("spy-rsi").textContent = r.spy_rsi;
+    }
+
+    // 3. sector rows
+    const { data: sectors } = await sb
+      .from("sector_scores")
+      .select("*")
+      .eq("run_id", runId)
+      .order("rsi", { ascending: false });
+
+    const sectorBody = document.getElementById("sector-rows");
+    sectorBody.innerHTML = "";
+    (sectors || []).forEach((s) => {
+      const vsSpy = s.outperforming_spy === true ? "outperforming"
+                  : s.outperforming_spy === false ? "underperforming" : null;
+      sectorBody.innerHTML += `
+        <tr>
+          <td class="ticker">${s.ticker}</td>
+          <td>${s.sector_name}</td>
+          <td class="right">$${s.price}</td>
+          <td class="right">${s.rsi}</td>
+          <td><span class="pill ${pillClass(s.trend)}">${s.trend}</span></td>
+          <td><span class="pill ${pillClass(s.classification)}">${s.classification}</span></td>
+          <td class="right">${s.relative_strength_rsi ?? "—"}</td>
+          <td>${vsSpy ? `<span class="pill ${vsSpy === "outperforming" ? "leading" : "lagging"}">${vsSpy}</span>` : "—"}</td>
+        </tr>`;
+    });
+    if (!sectors || !sectors.length) {
+      sectorBody.innerHTML = `<tr><td colspan="8" class="state-msg">No sector data for this run.</td></tr>`;
+    }
+
+    // 3b. weight changes (informational — may be empty most runs)
+    const { data: weightChanges } = await sb
+      .from("holdings_weight_changes")
+      .select("*")
+      .eq("run_id", runId);
+
+    const wcBody = document.getElementById("weight-change-rows");
+    wcBody.innerHTML = "";
+    (weightChanges || []).forEach((c) => {
+      const deltaText = c.delta === null ? "—" : (c.delta >= 0 ? "+" : "") + c.delta;
+      wcBody.innerHTML += `
+        <tr>
+          <td class="ticker">${c.etf_ticker}</td>
+          <td>${c.holding_ticker}</td>
+          <td><span class="pill ${c.change_type === "new_entrant" ? "leading" : c.change_type === "dropped" ? "lagging" : "mixed"}">${c.change_type.replace("_", " ")}</span></td>
+          <td class="right">${c.prev_weight ?? "—"}</td>
+          <td class="right">${c.new_weight ?? "—"}</td>
+          <td class="right">${deltaText}</td>
+        </tr>`;
+    });
+    if (!weightChanges || !weightChanges.length) {
+      wcBody.innerHTML = `<tr><td colspan="6" class="state-msg">No weight changes detected this run.</td></tr>`;
+    }
+
+    // 4. stock rows
+    const { data: stocks } = await sb
+      .from("stock_scores")
+      .select("*")
+      .eq("run_id", runId)
+      .order("rank", { ascending: true });
+
+    const stockBody = document.getElementById("stock-rows");
+    stockBody.innerHTML = "";
+    (stocks || []).forEach((s) => {
+      stockBody.innerHTML += `
+        <tr>
+          <td>${s.rank}</td>
+          <td class="ticker">${s.ticker}</td>
+          <td>${s.sector_etf}</td>
+          <td class="right">$${s.price}</td>
+          <td class="right">${s.rsi}</td>
+          <td><span class="pill ${pillClass(s.trend)}">${s.trend}</span></td>
+          <td class="right">${s.pe ?? "—"}</td>
+          <td class="right">${s.forward_pe ?? "—"}</td>
+          <td>
+            <span class="composite-bar"><div style="width:${s.composite_score}%"></div></span>
+            ${s.composite_score}
+          </td>
+        </tr>`;
+    });
+    if (!stocks || !stocks.length) {
+      stockBody.innerHTML = `<tr><td colspan="9" class="state-msg">No stock data for this run.</td></tr>`;
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>
