@@ -343,12 +343,12 @@ def fetch_pending_requests() -> dict[str, str]:
     return out
 
 
-def send_email(subject: str, html_body: str):
+def send_email(subject: str, html_body: str) -> bool:
     if not RESEND_API_KEY or not ALERT_EMAIL_TO:
         print("  [skip] no email credentials configured (RESEND_API_KEY / ALERT_EMAIL_TO) — "
               "would have sent:")
         print(f"    subject: {subject}")
-        return
+        return False
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
@@ -357,8 +357,9 @@ def send_email(subject: str, html_body: str):
     )
     if resp.status_code >= 300:
         print(f"  [error] email send failed: {resp.status_code} {resp.text[:300]}")
-    else:
-        print("  Notification email sent.")
+        return False
+    print("  Notification email sent.")
+    return True
 
 
 def handle_missing_holdings(sector_rows: list[dict], holdings_map: dict[str, list[str]]) -> None:
@@ -367,6 +368,12 @@ def handle_missing_holdings(sector_rows: list[dict], holdings_map: dict[str, lis
     against what's been uploaded (holdings_map, already fetched by the
     caller). Emails you about any newly-missing or stale-pending sectors, and
     marks fulfilled requests as resolved.
+
+    Important: a sector is only marked "already notified" (written to
+    holding_requests) if the email actually sent successfully. If Resend
+    errors out, nothing is persisted, so the very next run will try again
+    immediately instead of silently waiting out RENOTIFY_AFTER_DAYS for an
+    email you never received.
     """
     pending = fetch_pending_requests()
     now = datetime.datetime.utcnow()
@@ -381,34 +388,45 @@ def handle_missing_holdings(sector_rows: list[dict], holdings_map: dict[str, lis
                       {"fulfilled": True})
             pending.pop(etf, None)
 
-    to_notify = []
-    to_insert_rows = []
+    newly_missing = []
+    stale_pending = []
     for etf in missing:
         if etf not in pending:
-            to_insert_rows.append({"etf_ticker": etf, "requested_at": now.isoformat(), "fulfilled": False})
-            to_notify.append(etf)
+            newly_missing.append(etf)
         else:
             requested_at = datetime.datetime.fromisoformat(pending[etf].replace("Z", "+00:00")).replace(tzinfo=None)
             if (now - requested_at).days >= RENOTIFY_AFTER_DAYS:
-                sb_update("holding_requests", {"etf_ticker": f"eq.{etf}", "fulfilled": "eq.false"},
-                          {"requested_at": now.isoformat()})
-                to_notify.append(etf)
+                stale_pending.append(etf)
 
-    if to_insert_rows:
-        sb_insert("holding_requests", to_insert_rows)
+    to_notify = newly_missing + stale_pending
+    if not to_notify:
+        return
 
-    if to_notify:
-        names = ", ".join(f"{etf} ({SECTOR_ETFS.get(etf, etf)})" for etf in to_notify)
-        link = UPLOAD_URL or "(set UPLOAD_URL secret to include a direct link)"
-        html = f"""
-        <p>Money is currently moving into these sectors, but I don't have their
-        top {HOLDINGS_COUNT} holdings yet, so stock-level scoring is being
-        skipped for them this run:</p>
-        <ul>{"".join(f"<li><b>{etf}</b> — {SECTOR_ETFS.get(etf, etf)}</li>" for etf in to_notify)}</ul>
-        <p>Upload the top {HOLDINGS_COUNT} holdings for each here: <a href="{link}">{link}</a></p>
-        <p>Once submitted, the next scheduled run will pick them up automatically.</p>
-        """
-        send_email(f"Sector scan needs holdings for: {names}", html)
+    names = ", ".join(f"{etf} ({SECTOR_ETFS.get(etf, etf)})" for etf in to_notify)
+    link = UPLOAD_URL or "(set UPLOAD_URL secret to include a direct link)"
+    html = f"""
+    <p>Money is currently moving into these sectors, but I don't have their
+    top {HOLDINGS_COUNT} holdings yet, so stock-level scoring is being
+    skipped for them this run:</p>
+    <ul>{"".join(f"<li><b>{etf}</b> — {SECTOR_ETFS.get(etf, etf)}</li>" for etf in to_notify)}</ul>
+    <p>Upload the top {HOLDINGS_COUNT} holdings for each here: <a href="{link}">{link}</a></p>
+    <p>Once submitted, the next scheduled run will pick them up automatically.</p>
+    """
+    sent = send_email(f"Sector scan needs holdings for: {names}", html)
+
+    if not sent:
+        print("  [warn] email failed — not marking these sectors as notified, "
+              "will retry next run instead of waiting for RENOTIFY_AFTER_DAYS")
+        return
+
+    if newly_missing:
+        sb_insert("holding_requests", [
+            {"etf_ticker": etf, "requested_at": now.isoformat(), "fulfilled": False}
+            for etf in newly_missing
+        ])
+    for etf in stale_pending:
+        sb_update("holding_requests", {"etf_ticker": f"eq.{etf}", "fulfilled": "eq.false"},
+                  {"requested_at": now.isoformat()})
 
 
 # ---------------------------------------------------------------------------

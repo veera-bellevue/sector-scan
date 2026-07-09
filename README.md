@@ -75,13 +75,13 @@ Automates the sector/stock rotation framework:
    or trigger it manually from the Actions tab (`workflow_dispatch`).
 
 ## 4. Set up the dashboard + upload page
-1. Open `dashboard/index.html` and `dashboard/upload.html`, fill in both:
+1. Open `docs/index.html` and `docs/upload.html`, fill in both:
    ```js
    const SUPABASE_URL = "https://xxxx.supabase.co";
    const SUPABASE_ANON_KEY = "eyJ...";   // the anon/public key, NOT service_role
    ```
 2. Host both for free with GitHub Pages: Settings → Pages → deploy from the
-   `dashboard/` folder.
+   `docs/` folder.
 3. Go back and set the `UPLOAD_URL` secret (step 3) to the live
    `upload.html` link, then re-run the scan once so future emails include it.
 4. Security note: the anon key only has permission to SELECT on the scan
@@ -147,6 +147,42 @@ python scan.py
 You should see console output for each ticker, then a ranked summary. Check
 the Supabase table editor to confirm rows landed, then open the dashboard
 to confirm it reads them.
+
+## 9. Checking whether any of this actually works
+`backtest.py` is a separate script that checks the scanner's own past calls
+against what actually happened afterward:
+- Did sectors tagged **Leading** subsequently outperform ones tagged
+  **Lagging**, over the following 1 week / 1 month / 3 months?
+- Did **outperforming_spy=True** sectors keep outperforming SPY, or was
+  that coincident rather than predictive?
+- Did **Defensive rotation** regime calls precede weaker SPY forward
+  returns than **Cyclical / risk-on** calls — the pattern the 2000/2007
+  historical read predicts?
+- Did stocks with a higher `composite_score` actually go on to outperform
+  ones with a lower one?
+
+Run it the same way as `scan.py` (same env vars):
+```bash
+python backtest.py
+```
+
+**It won't tell you much until you have real history.** Any group with
+fewer than `BACKTEST_MIN_SAMPLES` (10 by default, in `config.py`)
+observations gets reported as "insufficient data" rather than a misleading
+mean — this is intentional, not a bug. It's meant to be run periodically
+(there's an optional, manually-triggered `backtest.yml` workflow — not
+scheduled by default, since running it before there's enough history just
+produces noise) once `scan.py` has been running for weeks or months.
+
+Results get stored in `backtest_results` in Supabase (public read) for
+every run, so you're building a record over time of whether this framework
+is actually adding signal — not just a one-time check.
+
+This is a sanity check, not a rigorous statistical backtest — no
+significance testing, no transaction costs, no adjustment for the fact that
+sectors and stocks aren't independent of each other. Treat a wide,
+consistent gap between groups over 50+ observations as suggestive; treat
+anything smaller or noisier as inconclusive.
 
 ## Extending it
 - **More sectors/holdings**: edit `SECTOR_ETFS` in `config.py`.

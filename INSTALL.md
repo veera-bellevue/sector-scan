@@ -87,22 +87,27 @@ time — edit the `cron` line if so.
 
 ## Step 5 — Host the dashboard and upload page
 
-1. Open `dashboard/index.html` in a text editor. Find these two lines near
+1. Open `docs/index.html` in a text editor. Find these two lines near
    the bottom and fill them in with your values from Step 2:
    ```js
    const SUPABASE_URL = "YOUR_SUPABASE_URL";
    const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
    ```
-2. Do the same in `dashboard/upload.html` (same two lines, same values).
+2. Do the same in `docs/upload.html` (same two lines, same values).
 3. Commit and push these changes:
    ```bash
-   git add dashboard/
+   git add docs/
    git commit -m "Add Supabase keys to dashboard"
    git push
    ```
 4. In your GitHub repo: **Settings → Pages** → under "Build and
    deployment," set Source to **Deploy from a branch**, branch `main`,
-   folder `/dashboard`. Save.
+   folder `/docs`. Save.
+   - **Important:** GitHub Pages' branch-deploy option only lets you pick
+     `/` (root) or `/docs` — no other folder name is selectable, even
+     though the search box looks like it accepts one. That's why this
+     project's dashboard files live in a folder named `docs/` rather than
+     something more descriptive.
 5. GitHub will give you a live URL, typically:
    `https://YOUR_USERNAME.github.io/YOUR_REPO/`
    - The dashboard is at that URL.
@@ -122,11 +127,21 @@ time — edit the `cron` line if so.
 
 ## Step 7 — Run it once locally to confirm everything works
 
-Before trusting the schedule, run the whole pipeline yourself once:
+Before trusting the schedule, run the whole pipeline yourself once.
 
 ```bash
 cd sector-scan
 pip install -r requirements.txt
+```
+
+Then set the environment variables for your shell — **the syntax differs by
+platform, and getting this wrong is the single most common setup error**
+(it produces a confusing `401 / row violates row-level security policy`
+error rather than an obvious "variable not set" error, because the request
+still goes through, just without the right permissions).
+
+**macOS / Linux / Git Bash:**
+```bash
 export SUPABASE_URL="https://xxxxx.supabase.co"
 export SUPABASE_SERVICE_KEY="eyJ..."          # service_role key
 export RESEND_API_KEY="re_..."
@@ -134,6 +149,34 @@ export ALERT_EMAIL_TO="you@example.com"
 export UPLOAD_URL="https://YOUR_USERNAME.github.io/YOUR_REPO/upload.html"
 python scan.py
 ```
+
+**Windows Command Prompt (cmd.exe) — no quotes around values:**
+```cmd
+set SUPABASE_URL=https://xxxxx.supabase.co
+set SUPABASE_SERVICE_KEY=eyJ...
+set RESEND_API_KEY=re_...
+set ALERT_EMAIL_TO=you@example.com
+set UPLOAD_URL=https://YOUR_USERNAME.github.io/YOUR_REPO/upload.html
+python scan.py
+```
+⚠️ In `cmd.exe`, `set VAR="value"` includes the quote characters *literally*
+in the value — unlike bash. Don't quote the values here even though it
+feels natural to.
+
+**Windows PowerShell — quotes are fine here:**
+```powershell
+$env:SUPABASE_URL = "https://xxxxx.supabase.co"
+$env:SUPABASE_SERVICE_KEY = "eyJ..."
+$env:RESEND_API_KEY = "re_..."
+$env:ALERT_EMAIL_TO = "you@example.com"
+$env:UPLOAD_URL = "https://YOUR_USERNAME.github.io/YOUR_REPO/upload.html"
+python scan.py
+```
+
+All three of these only last for your current terminal session — close the
+window and you'll need to set them again next time you run it locally
+(that's expected; the scheduled runs get their values from GitHub Actions
+secrets instead, not from your machine).
 
 You should see console output scanning SPY, each sector ETF, and (if any
 sector is Leading with no holdings yet) a note that it would send — or
@@ -182,10 +225,10 @@ required secrets are set and spelled exactly as in Step 4.
 
 **Dashboard shows "No runs found yet"**
 Either the workflow hasn't run yet (trigger it manually), or the anon key /
-URL in `dashboard/index.html` doesn't match your Supabase project.
+URL in `docs/index.html` doesn't match your Supabase project.
 
 **Upload form errors on submit**
-Almost always a mismatched or missing anon key in `dashboard/upload.html`.
+Almost always a mismatched or missing anon key in `docs/upload.html`.
 Double check it against Step 2, and make sure you pushed the file with the
 key filled in (Step 5.3).
 
@@ -193,6 +236,30 @@ key filled in (Step 5.3).
 Check `ALERT_EMAIL_TO` and `RESEND_API_KEY` are set correctly, and check
 your spam folder — mail from a shared sender domain (`onboarding@resend.dev`)
 sometimes lands there initially.
+
+**`401` / `new row violates row-level security policy` when running locally**
+This means the request reached Supabase but was authenticated as a
+low-privilege role (anon), not `service_role`, which is supposed to bypass
+RLS entirely. Two likely causes:
+1. You copied the **`anon`** key instead of the **`service_role`** key from
+   Supabase's API settings page — they sit right next to each other.
+2. (Windows `cmd.exe` specifically) You wrapped the value in quotes with
+   `set VAR="value"` — cmd.exe includes the quote characters literally in
+   the variable, corrupting the key. Don't quote values in `cmd.exe`; use
+   PowerShell's `$env:VAR = "value"` if you want to quote them, or drop the
+   quotes entirely in `cmd.exe`.
+
+Sanity-check the key before rerunning:
+```python
+python -c "import os; k=os.environ.get('SUPABASE_SERVICE_KEY',''); print('length:', len(k)); print('starts with eyJ:', k.startswith('eyJ')); print('has stray quotes:', '\"' in k)"
+```
+
+**"No results found" when picking a Pages folder**
+GitHub Pages only supports `/` (root) or `/docs` as the source folder for
+"Deploy from a branch" — typing any other folder name (like `/dashboard`)
+will always show "No results found," regardless of whether that folder
+actually exists in your repo. This project's dashboard files are named
+`docs/` for exactly this reason — pick `/docs` from the dropdown instead.
 
 **"relation does not exist" errors in the Actions log**
 The SQL in `schema.sql` didn't fully run — go back to Step 2.3 and re-run

@@ -1,0 +1,32 @@
+name: Backtest (manual)
+
+# Deliberately NOT scheduled by default — with only a handful of scan.py
+# runs on record, this will just report "insufficient data" for everything.
+# Trigger it manually from the Actions tab once you've got a few weeks/
+# months of history, or uncomment the schedule below once it's actually
+# producing results worth checking regularly.
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 22 * * 5"   # e.g. Friday evenings, once there's enough history
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python backtest.py

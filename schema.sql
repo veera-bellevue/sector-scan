@@ -71,7 +71,7 @@ create policy "public read sector_scores" on sector_scores for select using (tru
 create policy "public read stock_scores" on stock_scores for select using (true);
 
 -- ---------------------------------------------------------------------------
--- Top holdings: submitted by you via dashboard/upload.html when the scanner
+-- Top holdings: submitted by you via docs/upload.html when the scanner
 -- emails you asking for a sector's top 3 holdings. Each submission is a
 -- "batch" (3 rows sharing a batch_id) so the scanner can always find the
 -- most recent complete set per ETF, even if you update it later.
@@ -152,3 +152,26 @@ create policy "public read holdings_weight_changes" on holdings_weight_changes f
 -- ---------------------------------------------------------------------------
 -- alter table sector_scores add column if not exists relative_strength_rsi numeric;
 -- alter table sector_scores add column if not exists outperforming_spy boolean;
+
+-- ---------------------------------------------------------------------------
+-- Backtest results: computed by backtest.py, which checks whether past
+-- classifications actually predicted anything — e.g. did sectors tagged
+-- "Leading" subsequently outperform ones tagged "Lagging"? Did "Defensive
+-- rotation" regime calls precede weaker SPY returns, as the 2000/2007
+-- pattern would suggest? Public read so the dashboard can eventually show
+-- it; only backtest.py (service_role) writes.
+-- ---------------------------------------------------------------------------
+create table if not exists backtest_results (
+    id bigint generated always as identity primary key,
+    computed_at timestamptz not null default now(),
+    metric_type text not null,   -- 'sector_classification' | 'sector_relative_strength' | 'regime' | 'stock_composite'
+    group_label text not null,   -- e.g. 'Leading', 'outperforming_spy=true', 'Defensive rotation', 'top_tercile'
+    horizon text not null,       -- '1w' | '1m' | '3m'
+    mean_forward_return_pct numeric,
+    sample_count int not null,
+    note text
+);
+create index if not exists idx_backtest_results_computed on backtest_results(computed_at desc);
+
+alter table backtest_results enable row level security;
+create policy "public read backtest_results" on backtest_results for select using (true);

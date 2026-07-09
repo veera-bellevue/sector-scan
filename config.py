@@ -2,7 +2,7 @@
 Configuration for the sector rotation scanner.
 
 Edit SECTOR_ETFS to change which sector ETFs get scanned. Actual holdings
-are no longer configured here — they're submitted via dashboard/upload.html
+are no longer configured here — they're submitted via docs/upload.html
 and stored in Supabase (see fetch_all_holdings_batches() in scan.py), since
 free data sources don't reliably expose iShares/Vanguard ETF holdings.
 """
@@ -27,7 +27,7 @@ SECTOR_ETFS = {
 # How many top holdings to request per ETF via the upload form. 5 balances
 # coverage (catching a holding that's grown into real weight even if it
 # wasn't originally #1-3) against how much manual entry the form asks of
-# you. Must match HOLDINGS_COUNT in dashboard/upload.html if you change it —
+# you. Must match HOLDINGS_COUNT in docs/upload.html if you change it —
 # that file hardcodes 5 input rows rather than reading this value, since
 # it's a static HTML page with no build step.
 HOLDINGS_COUNT = 5
@@ -62,3 +62,13 @@ RENOTIFY_AFTER_DAYS = 3
 # between two submitted batches for the same ETF, flag it as a real change
 # (not just rounding noise) and include it in the weight-change alert email.
 WEIGHT_CHANGE_THRESHOLD_PTS = 2.0
+
+# --- backtest.py settings ---
+# Forward-return horizons to check, in trading days (~5/day-week, ~21/month).
+BACKTEST_HORIZONS = {"1w": 5, "1m": 21, "3m": 63}
+
+# Don't report a group's average forward return until at least this many
+# historical observations exist for it — a mean of 2 data points is noise,
+# not evidence, and reporting it with the same formatting as a real result
+# would overstate how much this backtest actually knows at low sample sizes.
+BACKTEST_MIN_SAMPLES = 10
