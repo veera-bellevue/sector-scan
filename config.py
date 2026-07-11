@@ -11,25 +11,35 @@ free data sources don't reliably expose iShares/Vanguard ETF holdings.
 # flag, and for the relative-strength-vs-SPY calculation on each sector.
 BENCHMARK = "SPY"
 
-# Sector ETFs to scan, with a short label for readability in reports
+# Sector ETFs to scan, with a short label for readability in reports.
+# All iShares (not mixed with Vanguard) so every fund's holdings export uses
+# the same CSV layout — see docs/upload.html, which parses that layout
+# specifically. Mapped 1:1 from the original Vanguard-based lineup:
+#   VDE -> IYE, VGT -> IYW, VHT -> IYH, VPU -> IDU, VIS -> IYJ, VAW -> IYM
+#   IYF, IYC, IYK were already iShares and are unchanged.
+# Note: sector_scores rows from before this switch (under the old Vanguard
+# tickers) remain in Supabase as history but won't get new data going
+# forward — backtest.py will see a discontinuity in that ticker's series
+# at the switchover date.
 SECTOR_ETFS = {
-    "VDE": "Energy",
-    "VGT": "Technology",
-    "VHT": "Healthcare",
-    "VPU": "Utilities",
-    "VIS": "Industrials",
-    "VAW": "Materials",
+    "IYE": "Energy",
+    "IYW": "Technology",
+    "IYH": "Healthcare",
+    "IDU": "Utilities",
+    "IYJ": "Industrials",
+    "IYM": "Materials",
     "IYF": "Financials",
     "IYC": "Consumer Discretionary",
     "IYK": "Consumer Staples",
 }
 
-# How many top holdings to request per ETF via the upload form. 5 balances
-# coverage (catching a holding that's grown into real weight even if it
-# wasn't originally #1-3) against how much manual entry the form asks of
-# you. Must match HOLDINGS_COUNT in docs/upload.html if you change it —
-# that file hardcodes 5 input rows rather than reading this value, since
-# it's a static HTML page with no build step.
+# How many top-weighted holdings to actually run composite scoring on, out
+# of whatever full holdings list you upload via docs/upload.html. Full lists
+# are still stored and diffed in their entirety for weight-change detection
+# (a holding falling from #4 to #7 in weight is a real, correctly-detected
+# reweight now — it's no longer just falling out of a small manually-typed
+# sample window). This only controls the expensive part: how many tickers
+# per sector get a live yfinance + fundamentals lookup each run.
 HOLDINGS_COUNT = 5
 
 # Technical thresholds

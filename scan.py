@@ -16,6 +16,8 @@ Run in CI (GitHub Actions):
 import os
 import sys
 import time
+import json
+import base64
 import datetime
 import requests
 import numpy as np
@@ -171,6 +173,43 @@ def composite(tech: float, val: float, pat: float) -> float:
 # Supabase writes
 # ---------------------------------------------------------------------------
 
+def validate_service_key():
+    """
+    Fail fast with an unmissable message if SUPABASE_SERVICE_KEY is the
+    wrong key (most commonly: anon copied instead of service_role) — this
+    exact mistake has already happened twice (once locally, once in GitHub
+    Actions), and left unchecked it only surfaces as a confusing
+    'row-level security policy' 401 buried partway through a stack trace.
+    Decodes the JWT payload directly rather than guessing from length/prefix.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return  # no creds at all — other functions already print a clear [skip] for this case
+
+    parts = SUPABASE_KEY.split(".")
+    if len(parts) != 3:
+        print("  [FATAL] SUPABASE_SERVICE_KEY doesn't look like a valid JWT "
+              "(expected 3 dot-separated segments). Check it was copied completely, with no missing characters.")
+        sys.exit(1)
+
+    try:
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload + padding))
+    except Exception as e:
+        print(f"  [warn] Could not decode SUPABASE_SERVICE_KEY to verify its role ({e}) — proceeding anyway.")
+        return
+
+    role = decoded.get("role")
+    if role != "service_role":
+        print(f'  [FATAL] SUPABASE_SERVICE_KEY has role="{role}", not "service_role".')
+        print('  You almost certainly copied the "anon" key by mistake. Go to Supabase -> Project Settings -> API,')
+        print('  copy the key explicitly labeled "service_role secret" (NOT "anon public"), and update it wherever')
+        print('  this is running from — your local shell env var, or the SUPABASE_SERVICE_KEY GitHub Actions secret.')
+        sys.exit(1)
+
+    print(f"  Supabase key check OK (role=service_role, project ref={decoded.get('ref')})")
+
+
 def sb_headers():
     return {
         "apikey": SUPABASE_KEY,
@@ -226,47 +265,75 @@ def create_run() -> int | None:
 # Holdings lookup + email notification
 # ---------------------------------------------------------------------------
 
-def fetch_all_holdings_batches() -> dict[str, list[dict]]:
+def fetch_all_holdings_batches(max_batches_per_etf: int = 2) -> dict[str, list[dict]]:
     """
     Returns {etf_ticker: [batch, batch, ...]}, newest batch first, where each
     batch is {"batch_id", "created_at", "holdings": [{"ticker","rank","weight_pct"}]}.
-    A single query for the whole table — cheap enough at this scale and avoids
-    N per-ETF round trips.
+
+    Two-tier query: first hits holdings_batches_ranked (one row per batch,
+    not per holding) to find just the latest max_batches_per_etf batch_ids
+    per ETF, then does a single targeted fetch of only those rows from
+    top_holdings. This stays cheap regardless of how many quarters of
+    uploads have accumulated in top_holdings over time, rather than pulling
+    the entire submission history on every run.
     """
-    rows = sb_select("top_holdings", {
-        "select": "etf_ticker,holding_ticker,rank,weight_pct,batch_id,created_at",
-        "order": "created_at.desc",
+    batch_index = sb_select("holdings_batches_ranked", {
+        "select": "etf_ticker,batch_id,created_at,batch_rank",
+        "batch_rank": f"lte.{max_batches_per_etf}",
     })
+    if not batch_index:
+        return {}
+
+    batch_ids = [b["batch_id"] for b in batch_index]
+    holdings_rows = sb_select("top_holdings", {
+        "select": "etf_ticker,holding_ticker,rank,weight_pct,batch_id,created_at",
+        "batch_id": f"in.({','.join(batch_ids)})",
+    })
+
     grouped: dict[str, dict[str, dict]] = {}
-    order: dict[str, list[str]] = {}
-    for r in rows:
-        etf = r["etf_ticker"]
-        bid = r["batch_id"]
+    for r in holdings_rows:
+        etf, bid = r["etf_ticker"], r["batch_id"]
         grouped.setdefault(etf, {})
-        order.setdefault(etf, [])
         if bid not in grouped[etf]:
             grouped[etf][bid] = {"batch_id": bid, "created_at": r["created_at"], "holdings": []}
-            order[etf].append(bid)
         grouped[etf][bid]["holdings"].append({
             "ticker": r["holding_ticker"], "rank": r["rank"], "weight_pct": r.get("weight_pct"),
         })
 
+    # Order each ETF's batches newest-first using the (small) batch_index,
+    # rather than re-deriving order from the (larger) holdings_rows result.
+    order: dict[str, list[str]] = {}
+    for b in sorted(batch_index, key=lambda x: x["created_at"], reverse=True):
+        order.setdefault(b["etf_ticker"], []).append(b["batch_id"])
+
     out = {}
     for etf, bids in order.items():
-        batches = [grouped[etf][b] for b in bids]
+        batches = [grouped[etf][bid] for bid in bids if bid in grouped.get(etf, {})]
         for b in batches:
             b["holdings"].sort(key=lambda h: h["rank"])
         out[etf] = batches
     return out
 
 
-def latest_holdings_map(all_batches: dict[str, list[dict]]) -> dict[str, list[str]]:
-    """{etf: [ticker, ...]} from just the most recent batch per ETF — this is
-    what the stock-scoring loop actually needs."""
-    return {
-        etf: [h["ticker"] for h in batches[0]["holdings"]]
-        for etf, batches in all_batches.items() if batches
-    }
+def latest_holdings_map(all_batches: dict[str, list[dict]], top_n: int = HOLDINGS_COUNT) -> dict[str, list[str]]:
+    """
+    {etf: [ticker, ...]} — the top_n highest-weighted tickers from the most
+    recent batch per ETF, for the stock-scoring loop. Sorted by weight_pct
+    when available (the normal case for a full CSV upload); falls back to
+    submission order (rank) for any row missing a weight, so a partially
+    incomplete upload still degrades gracefully instead of erroring.
+    """
+    result = {}
+    for etf, batches in all_batches.items():
+        if not batches:
+            continue
+        holdings = batches[0]["holdings"]
+        sorted_holdings = sorted(
+            holdings,
+            key=lambda h: (h["weight_pct"] is None, -(h["weight_pct"] or 0), h["rank"]),
+        )
+        result[etf] = [h["ticker"] for h in sorted_holdings[:top_n]]
+    return result
 
 
 def detect_weight_changes(all_batches: dict[str, list[dict]],
@@ -406,11 +473,13 @@ def handle_missing_holdings(sector_rows: list[dict], holdings_map: dict[str, lis
     link = UPLOAD_URL or "(set UPLOAD_URL secret to include a direct link)"
     html = f"""
     <p>Money is currently moving into these sectors, but I don't have their
-    top {HOLDINGS_COUNT} holdings yet, so stock-level scoring is being
-    skipped for them this run:</p>
+    holdings on file yet, so stock-level scoring (top {HOLDINGS_COUNT} by
+    weight) is being skipped for them this run:</p>
     <ul>{"".join(f"<li><b>{etf}</b> — {SECTOR_ETFS.get(etf, etf)}</li>" for etf in to_notify)}</ul>
-    <p>Upload the top {HOLDINGS_COUNT} holdings for each here: <a href="{link}">{link}</a></p>
-    <p>Once submitted, the next scheduled run will pick them up automatically.</p>
+    <p>For each one: go to the fund's page on ishares.com, open the
+    <b>Holdings</b> tab, and download/export the full holdings CSV. Then
+    upload that file here: <a href="{link}">{link}</a></p>
+    <p>Once submitted, the next scheduled run will pick it up automatically.</p>
     """
     sent = send_email(f"Sector scan needs holdings for: {names}", html)
 
@@ -481,6 +550,7 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
 
 def main():
     print(f"=== Sector scan run @ {datetime.datetime.utcnow().isoformat()} UTC ===")
+    validate_service_key()
     run_id = create_run()
     print(f"run_id = {run_id}")
 
