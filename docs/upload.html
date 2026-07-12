@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Submit Top Holdings — Sector Scan</title>
+<title>Submit Holdings CSV — Sector Scan</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <style>
   :root {
     --bg: #0b0e14;
@@ -28,7 +29,7 @@
     justify-content: center;
   }
   .card {
-    max-width: 460px;
+    max-width: 620px;
     width: 100%;
     background: var(--panel);
     border: 1px solid var(--panel-border);
@@ -43,7 +44,8 @@
     color: var(--ink-dim);
   }
   h1 { font-size: 22px; margin: 6px 0 4px; }
-  p.help { color: var(--ink-dim); font-size: 13px; margin-bottom: 24px; }
+  p.help { color: var(--ink-dim); font-size: 13px; line-height: 1.5; }
+  p.help a { color: var(--accent); }
 
   label {
     display: block;
@@ -55,7 +57,7 @@
     margin-bottom: 6px;
     margin-top: 18px;
   }
-  select, input {
+  select {
     width: 100%;
     background: #0e1219;
     border: 1px solid var(--panel-border);
@@ -65,24 +67,46 @@
     font-family: var(--mono);
     font-size: 14px;
   }
-  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  select:focus { outline: none; border-color: var(--accent); }
 
-  .holding-row { display: flex; gap: 10px; margin-bottom: 10px; }
-  .holding-row .rank {
-    width: 22px;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .dropzone {
+    margin-top: 10px;
+    border: 1.5px dashed var(--panel-border);
+    border-radius: 10px;
+    padding: 28px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .dropzone:hover, .dropzone.drag-over { border-color: var(--accent); }
+  .dropzone input[type="file"] { display: none; }
+  .dropzone .icon { font-size: 28px; margin-bottom: 8px; }
+  .dropzone .main-text { font-size: 14px; }
+  .dropzone .sub-text { font-size: 12px; color: var(--ink-dim); margin-top: 4px; }
+
+  .preview {
+    margin-top: 16px;
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .preview-header {
+    padding: 10px 14px;
+    background: #0e1219;
     font-family: var(--mono);
     font-size: 12px;
     color: var(--ink-dim);
+    display: flex;
+    justify-content: space-between;
   }
-  .holding-row input.ticker-input { flex: 2; }
-  .holding-row input.weight-input { flex: 1; }
+  .preview table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .preview th, .preview td { padding: 6px 14px; text-align: left; font-family: var(--mono); }
+  .preview th { color: var(--ink-dim); font-size: 11px; text-transform: uppercase; }
+  .preview tr:not(:last-child) td { border-bottom: 1px solid #191d27; }
+  .preview .more-row { color: var(--ink-dim); font-style: italic; }
 
   button {
-    margin-top: 24px;
+    margin-top: 20px;
     width: 100%;
     background: var(--accent);
     color: #06110d;
@@ -98,65 +122,51 @@
   .status { margin-top: 16px; font-family: var(--mono); font-size: 13px; }
   .status.ok { color: var(--accent); }
   .status.err { color: var(--danger); }
+  .status.warn { color: #f2b84b; }
 </style>
 </head>
 <body>
 <div class="card">
   <div class="eyebrow">Sector Scan</div>
-  <h1>Submit top 5 holdings</h1>
+  <h1>Submit holdings CSV</h1>
   <p class="help">
-    Enter the top 5 holdings (by weight) for the ETF you were emailed about.
-    The next scheduled run will pick this up automatically and score these
-    stocks.
+    Go to the fund's page on <a href="https://www.ishares.com" target="_blank">ishares.com</a>,
+    open the <b>Holdings</b> tab, and export/download the full holdings CSV.
+    Then pick the matching ETF below and upload that file — the scanner
+    will score the top holdings by weight and track changes across your
+    whole holdings history, not just a handful of names.
   </p>
 
   <label for="etf">ETF</label>
   <select id="etf">
-    <option value="VDE">VDE — Energy</option>
-    <option value="VGT">VGT — Technology</option>
-    <option value="VHT">VHT — Healthcare</option>
-    <option value="VPU">VPU — Utilities</option>
-    <option value="VIS">VIS — Industrials</option>
-    <option value="VAW">VAW — Materials</option>
+    <option value="IYE">IYE — Energy</option>
+    <option value="IYW">IYW — Technology</option>
+    <option value="IYH">IYH — Healthcare</option>
+    <option value="IDU">IDU — Utilities</option>
+    <option value="IYJ">IYJ — Industrials</option>
+    <option value="IYM">IYM — Materials</option>
     <option value="IYF">IYF — Financials</option>
     <option value="IYC">IYC — Consumer Discretionary</option>
     <option value="IYK">IYK — Consumer Staples</option>
   </select>
 
-  <label>Top 5 holdings (ticker + weight %)</label>
-  <div class="holding-row">
-    <span class="rank">1</span>
-    <input id="h1" class="ticker-input" placeholder="Ticker e.g. PG" maxlength="8" />
-    <input id="w1" class="weight-input" placeholder="wt % e.g. 13.7" type="number" step="0.1" />
+  <label>Holdings CSV</label>
+  <div class="dropzone" id="dropzone">
+    <input type="file" id="file-input" accept=".csv" />
+    <div class="icon">&#128193;</div>
+    <div class="main-text" id="dropzone-text">Click to choose a file, or drag one here</div>
+    <div class="sub-text">.csv exported from the fund's Holdings tab</div>
   </div>
-  <div class="holding-row">
-    <span class="rank">2</span>
-    <input id="h2" class="ticker-input" placeholder="Ticker e.g. KO" maxlength="8" />
-    <input id="w2" class="weight-input" placeholder="wt % e.g. 12.3" type="number" step="0.1" />
-  </div>
-  <div class="holding-row">
-    <span class="rank">3</span>
-    <input id="h3" class="ticker-input" placeholder="Ticker e.g. PM" maxlength="8" />
-    <input id="w3" class="weight-input" placeholder="wt % e.g. 10.8" type="number" step="0.1" />
-  </div>
-  <div class="holding-row">
-    <span class="rank">4</span>
-    <input id="h4" class="ticker-input" placeholder="Ticker" maxlength="8" />
-    <input id="w4" class="weight-input" placeholder="wt %" type="number" step="0.1" />
-  </div>
-  <div class="holding-row">
-    <span class="rank">5</span>
-    <input id="h5" class="ticker-input" placeholder="Ticker" maxlength="8" />
-    <input id="w5" class="weight-input" placeholder="wt %" type="number" step="0.1" />
-  </div>
-  <p class="help" style="margin-top:6px; margin-bottom: 0;">
-    Weight % is optional but recommended — it's what lets the scanner detect
-    when a holding's size changes between submissions (e.g. after an earnings
-    miss or a rebalance).
-  </p>
 
+  <div class="preview" id="preview" style="display:none">
+    <div class="preview-header">
+      <span id="preview-count"></span>
+      <span id="preview-weight-sum"></span>
+    </div>
+    <table id="preview-table"></table>
+  </div>
 
-  <button id="submit-btn">Submit</button>
+  <button id="submit-btn" disabled>Choose a file first</button>
   <div class="status" id="status"></div>
 </div>
 
@@ -165,62 +175,173 @@
   const SUPABASE_URL = "https://dkmbhewrevroyympzust.supabase.co";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRrbWJoZXdyZXZyb3l5bXB6dXN0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1MzM5OTYsImV4cCI6MjA5OTEwOTk5Nn0.FOJ5_Q0IYMMZBnk7jntHwNr_npqTFE0c1L5NPwaA6kw";
 
+
   const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  const statusEl = document.getElementById("status");
-  const btn = document.getElementById("submit-btn");
 
-  // Pre-select the ETF if linked with ?etf=IYK
-  const params = new URLSearchParams(window.location.search);
-  const preselect = params.get("etf");
-  if (preselect) {
-    const sel = document.getElementById("etf");
-    if ([...sel.options].some(o => o.value === preselect)) sel.value = preselect;
-  }
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('file-input');
+  const dropzoneText = document.getElementById('dropzone-text');
+  const preview = document.getElementById('preview');
+  const previewCount = document.getElementById('preview-count');
+  const previewWeightSum = document.getElementById('preview-weight-sum');
+  const previewTable = document.getElementById('preview-table');
+  const btn = document.getElementById('submit-btn');
+  const statusEl = document.getElementById('status');
 
-  btn.addEventListener("click", async () => {
-    const etf = document.getElementById("etf").value;
-    const slots = ["1", "2", "3", "4", "5"].map(n => ({
-      ticker: document.getElementById("h" + n).value.trim().toUpperCase(),
-      weight: document.getElementById("w" + n).value.trim(),
-    })).filter(s => s.ticker);
+  let parsedHoldings = null; // [{ticker, name, weight_pct}, ...]
 
-    if (slots.length !== 5) {
-      statusEl.textContent = "Please enter all 5 tickers.";
-      statusEl.className = "status err";
-      return;
-    }
-    for (const s of slots) {
-      if (s.weight !== "" && (isNaN(s.weight) || s.weight < 0 || s.weight > 100)) {
-        statusEl.textContent = `Weight for ${s.ticker} must be a number between 0 and 100.`;
-        statusEl.className = "status err";
-        return;
+  // --- Parsing (unit-tested with Node/PapaParse before shipping — keep in
+  // sync with that test harness if edited) ---
+  function parseHoldingsCsv(rawText) {
+    const parsed = Papa.parse(rawText.trim(), { skipEmptyLines: false });
+    const rows = parsed.data;
+
+    let headerIdx = -1, tickerCol = -1, weightCol = -1, nameCol = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const lower = rows[i].map(c => (c || '').toString().trim().toLowerCase());
+      const tIdx = lower.indexOf('ticker');
+      if (tIdx !== -1) {
+        headerIdx = i;
+        tickerCol = tIdx;
+        weightCol = lower.findIndex(c => c.includes('weight'));
+        nameCol = lower.indexOf('name');
+        break;
       }
     }
 
+    if (headerIdx === -1 || weightCol === -1) {
+      return { error: 'Could not find "Ticker" and "Weight" columns in this file. ' +
+        'Make sure you exported the full holdings CSV from the fund\'s Holdings tab.' };
+    }
+
+    const holdings = [];
+    const seen = new Set();
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || row.length <= tickerCol) break;
+
+      const ticker = (row[tickerCol] || '').toString().trim().toUpperCase();
+      const name = nameCol !== -1 ? (row[nameCol] || '').toString().trim() : '';
+      const weightRaw = (row[weightCol] || '').toString().trim();
+
+      if (!ticker) break;
+      if (/CASH|DERIVATIVE|FUTURE|USD$/i.test(name) || ticker === 'USD' || ticker === '-') continue;
+
+      const weight = parseFloat(weightRaw.replace(/[^0-9.\-]/g, ''));
+      if (isNaN(weight)) continue;
+
+      if (seen.has(ticker)) continue;
+      seen.add(ticker);
+
+      holdings.push({ ticker, name, weight_pct: weight });
+      if (holdings.length >= 500) break;
+    }
+
+    if (holdings.length === 0) {
+      return { error: 'Found the header row but no valid holdings rows after it. Check the file format.' };
+    }
+
+    holdings.sort((a, b) => b.weight_pct - a.weight_pct);
+    const weightSum = Math.round(holdings.reduce((s, h) => s + h.weight_pct, 0) * 100) / 100;
+    return { holdings, weightSum };
+  }
+
+  function renderPreview(result) {
+    if (result.error) {
+      preview.style.display = 'none';
+      btn.disabled = true;
+      btn.textContent = 'Choose a file first';
+      statusEl.textContent = result.error;
+      statusEl.className = 'status err';
+      parsedHoldings = null;
+      return;
+    }
+
+    parsedHoldings = result.holdings;
+    statusEl.textContent = '';
+    statusEl.className = 'status';
+
+    previewCount.textContent = `${result.holdings.length} holdings found`;
+    const sumWarn = Math.abs(result.weightSum - 100) > 15; // loose sanity check
+    previewWeightSum.textContent = `weights sum to ${result.weightSum}%`;
+    previewWeightSum.style.color = sumWarn ? '#f2b84b' : 'var(--ink-dim)';
+    if (sumWarn) {
+      statusEl.textContent = `Heads up: weights sum to ${result.weightSum}%, which is further from 100% than expected — double check this is the right file before submitting.`;
+      statusEl.className = 'status warn';
+    }
+
+    const top10 = result.holdings.slice(0, 10);
+    let html = '<tr><th>Ticker</th><th>Name</th><th>Weight %</th></tr>';
+    top10.forEach(h => {
+      html += `<tr><td>${h.ticker}</td><td>${h.name || '—'}</td><td>${h.weight_pct}%</td></tr>`;
+    });
+    if (result.holdings.length > 10) {
+      html += `<tr class="more-row"><td colspan="3">...and ${result.holdings.length - 10} more</td></tr>`;
+    }
+    previewTable.innerHTML = html;
+    preview.style.display = 'block';
+
+    btn.disabled = false;
+    btn.textContent = `Submit ${result.holdings.length} holdings for ${document.getElementById('etf').value}`;
+  }
+
+  function handleFile(file) {
+    if (!file) return;
+    dropzoneText.textContent = file.name;
+    const reader = new FileReader();
+    reader.onload = (e) => renderPreview(parseHoldingsCsv(e.target.result));
+    reader.onerror = () => {
+      statusEl.textContent = 'Could not read that file.';
+      statusEl.className = 'status err';
+    };
+    reader.readAsText(file);
+  }
+
+  dropzone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => handleFile(e.target.files[0]));
+
+  ['dragenter', 'dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); }));
+  ['dragleave', 'drop'].forEach(evt =>
+    dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove('drag-over'); }));
+  dropzone.addEventListener('drop', (e) => {
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  });
+
+  document.getElementById('etf').addEventListener('change', () => {
+    if (parsedHoldings) {
+      btn.textContent = `Submit ${parsedHoldings.length} holdings for ${document.getElementById('etf').value}`;
+    }
+  });
+
+  btn.addEventListener('click', async () => {
+    if (!parsedHoldings || parsedHoldings.length === 0) return;
+    const etf = document.getElementById('etf').value;
+
     btn.disabled = true;
-    statusEl.textContent = "Submitting…";
-    statusEl.className = "status";
+    statusEl.textContent = 'Submitting…';
+    statusEl.className = 'status';
 
     const batchId = crypto.randomUUID();
-    const rows = slots.map((s, i) => ({
+    const rows = parsedHoldings.map((h, i) => ({
       etf_ticker: etf,
-      holding_ticker: s.ticker,
+      holding_ticker: h.ticker,
       rank: i + 1,
-      weight_pct: s.weight === "" ? null : parseFloat(s.weight),
+      weight_pct: h.weight_pct,
       batch_id: batchId,
     }));
 
-    const { error } = await sb.from("top_holdings").insert(rows);
+    const { error } = await sb.from('top_holdings').insert(rows);
 
     btn.disabled = false;
     if (error) {
-      statusEl.textContent = "Something went wrong: " + error.message;
-      statusEl.className = "status err";
+      statusEl.textContent = 'Something went wrong: ' + error.message;
+      statusEl.className = 'status err';
     } else {
-      const summary = slots.map(s => s.ticker + (s.weight ? ` (${s.weight}%)` : "")).join(", ");
-      statusEl.textContent = `Saved. ${etf} will be scored using ${summary} on the next run.`;
-      statusEl.className = "status ok";
-      ["h1", "w1", "h2", "w2", "h3", "w3", "h4", "w4", "h5", "w5"].forEach(id => document.getElementById(id).value = "");
+      statusEl.textContent = `Saved ${rows.length} holdings for ${etf}. The next scheduled run will score the top holdings by weight automatically.`;
+      statusEl.className = 'status ok';
+      btn.textContent = `Submit ${parsedHoldings.length} holdings for ${etf}`;
     }
   });
 </script>
