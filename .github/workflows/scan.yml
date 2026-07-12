@@ -1,26 +1,21 @@
 name: Sector Scan
-
 on:
   schedule:
-    # 21:30 UTC = 4:30pm ET during EDT (market close). Adjust for EST (+1hr) if needed.
-    - cron: "30 20 * * 1-5"
+    # 00:30 UTC = 7:30pm ET during EDT (market close). Adjust for EST (+1hr) if needed.
+    - cron: "30 00 * * 1-6"
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
-
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run scanner
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -29,3 +24,10 @@ jobs:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
           UPLOAD_URL: ${{ secrets.UPLOAD_URL }}
         run: python scan.py
+      - name: Track volume surge outcomes
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+        run: python surge_outcomes.py
