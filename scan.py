@@ -29,6 +29,7 @@ from config import (
     RSI_OVERBOUGHT, RSI_OVERSOLD, RSI_BULL_MOMENTUM, RSI_WEAK_MOMENTUM,
     LOOKBACK, INTERVAL, WEIGHT_TECHNICAL, WEIGHT_VALUATION, WEIGHT_PATTERN,
     HOLDINGS_REQUIRED_FOR, RENOTIFY_AFTER_DAYS, WEIGHT_CHANGE_THRESHOLD_PTS,
+    REL_VOLUME_LOOKBACK, REL_VOLUME_SURGE, UP_DOWN_VOLUME_LOOKBACK,
 )
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -62,6 +63,39 @@ def compute_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     rsi[loss_zero] = 100.0
     rsi[both_zero] = 50.0  # flat price, no movement either way
     return rsi
+
+
+def compute_rel_volume(volume: pd.Series, lookback: int = REL_VOLUME_LOOKBACK) -> float | None:
+    """Latest bar's volume as a multiple of its own trailing average (the
+    average excludes the latest bar itself, so a huge print doesn't dilute
+    its own baseline). None if there isn't enough history yet."""
+    if len(volume) < lookback + 1:
+        return None
+    avg = volume.iloc[-(lookback + 1):-1].mean()
+    if avg <= 0:
+        return None
+    return round(float(volume.iloc[-1] / avg), 2)
+
+
+def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
+                                  lookback: int = UP_DOWN_VOLUME_LOOKBACK) -> float | None:
+    """Average volume on up-closes vs down-closes over the trailing window —
+    a rough accumulation/distribution proxy. >1 means more volume is showing
+    up on up days than down days. None if there's no volume on one side yet
+    (e.g. a straight-line move) or not enough history."""
+    if len(close) < lookback + 1:
+        return None
+    recent_close = close.iloc[-lookback:]
+    recent_vol = volume.iloc[-lookback:]
+    day_change = recent_close.diff()
+    up_vol = recent_vol[day_change > 0]
+    down_vol = recent_vol[day_change < 0]
+    if len(up_vol) == 0 or len(down_vol) == 0:
+        return None
+    avg_down = down_vol.mean()
+    if avg_down <= 0:
+        return None
+    return round(float(up_vol.mean() / avg_down), 2)
 
 
 def fetch_history(ticker: str) -> pd.DataFrame | None:
@@ -509,6 +543,7 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
     if df is None:
         return None
     close = df["Close"]
+    volume = df["Volume"]
     price = float(close.iloc[-1])
     sma50 = float(close.rolling(50).mean().iloc[-1])
     sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(close.mean())
@@ -516,6 +551,9 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
     rsi = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else 50.0
     trend = classify_trend(price, sma50, sma200)
     crossings = rsi_overbought_history_flag(rsi_series.dropna())
+    rel_volume = compute_rel_volume(volume)
+    up_down_volume_ratio = compute_up_down_volume_ratio(close, volume)
+    volume_surge = rel_volume is not None and rel_volume >= REL_VOLUME_SURGE
 
     # --- Relative strength vs SPY (additive, doesn't change absolute classification) ---
     relative_strength_rsi = None
@@ -545,6 +583,9 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
         "low_52w": round(float(close.min()), 2),
         "relative_strength_rsi": relative_strength_rsi,
         "outperforming_spy": outperforming_spy,
+        "rel_volume": rel_volume,
+        "up_down_volume_ratio": up_down_volume_ratio,
+        "volume_surge": volume_surge,
     }
 
 
@@ -588,6 +629,9 @@ def main():
             "classification": classification,
             "relative_strength_rsi": data["relative_strength_rsi"],
             "outperforming_spy": data["outperforming_spy"],
+            "rel_volume": data["rel_volume"],
+            "up_down_volume_ratio": data["up_down_volume_ratio"],
+            "volume_surge": data["volume_surge"],
         })
         time.sleep(0.3)  # be polite to the free data source
 
@@ -660,6 +704,9 @@ def main():
                 "high_52w": data["high_52w"],
                 "low_52w": data["low_52w"],
                 "overbought_crossings_1y": data["overbought_crossings_1y"],
+                "rel_volume": data["rel_volume"],
+                "up_down_volume_ratio": data["up_down_volume_ratio"],
+                "volume_surge": data["volume_surge"],
                 "pe": fund["pe"],
                 "forward_pe": fund["forward_pe"],
                 "peg": fund["peg"],
@@ -679,8 +726,12 @@ def main():
 
     print("=== Done ===")
     for row in stock_rows:
+        rv = row["rel_volume"]
+        rv_str = f"{rv}x" if rv is not None else "n/a"
+        flag = " [VOL SURGE]" if row["volume_surge"] else ""
         print(f"  #{row['rank']} {row['ticker']:6s} composite={row['composite_score']:5.1f} "
-              f"(tech={row['technical_score']}, val={row['valuation_score']}, pattern={row['pattern_score']})")
+              f"(tech={row['technical_score']}, val={row['valuation_score']}, pattern={row['pattern_score']}) "
+              f"rel_vol={rv_str}{flag}")
 
 
 if __name__ == "__main__":

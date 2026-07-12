@@ -53,6 +53,24 @@ RSI_WEAK_MOMENTUM = 50   # RSI below this + bull SMA structure = "Stalling"
 LOOKBACK = "1y"
 INTERVAL = "1d"
 
+# --- Relative volume (Phase 1: leading/accumulation signal) ---
+# Trading-day window for the "average volume" baseline that today's/latest
+# bar's volume gets compared against.
+REL_VOLUME_LOOKBACK = 20
+
+# rel_volume >= this multiple of the trailing average = a real volume surge,
+# not just day-to-day noise. Used both for future classification tiers and
+# as a standalone data point on the dashboard in the meantime.
+REL_VOLUME_SURGE = 1.5
+
+# Window (in trading days) used for up_day_volume_ratio: average volume on
+# up-closes vs down-closes over this many recent sessions. A ratio > 1 means
+# more volume is showing up on up days than down days — a rough accumulation
+# proxy. Kept separate from REL_VOLUME_LOOKBACK since "is today unusual" and
+# "what's the recent up/down volume skew" are different questions with
+# different natural windows.
+UP_DOWN_VOLUME_LOOKBACK = 20
+
 # Composite score weights (must sum to 1.0)
 WEIGHT_TECHNICAL = 0.4
 WEIGHT_VALUATION = 0.4
