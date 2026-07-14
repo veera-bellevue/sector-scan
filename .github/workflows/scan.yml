@@ -1,13 +1,8 @@
 name: Sector Scan
 on:
   schedule:
-<<<<<<< HEAD
-    # 23:30 UTC = 7:30pm ET during EDT (market close). Adjust for EST (+1hr) if needed.
+    # 23:30 UTC. Adjust for daylight saving shifts as needed.
     - cron: "30 23 * * 1-6"
-=======
-    # 00:30 UTC = 7:30pm ET during EDT (market close). Adjust for EST (+1hr) if needed.
-    - cron: "30 00 * * 1-6"
->>>>>>> 917507eb8d311c3b00a13fed7c80c8a7b2685401
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
 jobs:
   scan:
@@ -21,14 +16,11 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-<<<<<<< HEAD
       - name: Load ETF holdings
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python holdings_loader.py
-=======
->>>>>>> 917507eb8d311c3b00a13fed7c80c8a7b2685401
       - name: Run scanner
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
