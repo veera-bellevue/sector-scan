@@ -23,6 +23,7 @@ import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import math
 
 from config import (
     BENCHMARK, SECTOR_ETFS, RSI_PERIOD, HOLDINGS_COUNT,
@@ -68,13 +69,21 @@ def compute_rsi(close: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
 def compute_rel_volume(volume: pd.Series, lookback: int = REL_VOLUME_LOOKBACK) -> float | None:
     """Latest bar's volume as a multiple of its own trailing average (the
     average excludes the latest bar itself, so a huge print doesn't dilute
-    its own baseline). None if there isn't enough history yet."""
+    its own baseline). None if there isn't enough history yet, or if the
+    inputs/result aren't finite (e.g. NaN volume bars from a data gap, or a
+    zero-volume baseline that would otherwise divide out to inf)."""
     if len(volume) < lookback + 1:
         return None
     avg = volume.iloc[-(lookback + 1):-1].mean()
-    if avg <= 0:
+    if avg is None or not math.isfinite(avg) or avg <= 0:
         return None
-    return round(float(volume.iloc[-1] / avg), 2)
+    latest = volume.iloc[-1]
+    if latest is None or not math.isfinite(latest):
+        return None
+    val = latest / avg
+    if not math.isfinite(val):
+        return None
+    return round(float(val), 2)
 
 
 def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
@@ -82,7 +91,9 @@ def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
     """Average volume on up-closes vs down-closes over the trailing window —
     a rough accumulation/distribution proxy. >1 means more volume is showing
     up on up days than down days. None if there's no volume on one side yet
-    (e.g. a straight-line move) or not enough history."""
+    (e.g. a straight-line move), not enough history, or the inputs/result
+    aren't finite (e.g. NaN volume bars, or an all-down-volume window that
+    would otherwise divide out to inf)."""
     if len(close) < lookback + 1:
         return None
     recent_close = close.iloc[-lookback:]
@@ -92,10 +103,16 @@ def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
     down_vol = recent_vol[day_change < 0]
     if len(up_vol) == 0 or len(down_vol) == 0:
         return None
+    avg_up = up_vol.mean()
     avg_down = down_vol.mean()
-    if avg_down <= 0:
+    if avg_down is None or not math.isfinite(avg_down) or avg_down <= 0:
         return None
-    return round(float(up_vol.mean() / avg_down), 2)
+    if avg_up is None or not math.isfinite(avg_up):
+        return None
+    val = avg_up / avg_down
+    if not math.isfinite(val):
+        return None
+    return round(float(val), 2)
 
 
 def fetch_history(ticker: str) -> pd.DataFrame | None:
@@ -138,17 +155,27 @@ def rsi_overbought_history_flag(rsi_series: pd.Series) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Fundamentals (best-effort; yfinance fundamentals can be missing/None)
+# Fundamentals (best-effort; yfinance fundamentals can be missing/None/NaN)
 # ---------------------------------------------------------------------------
 
 def fetch_fundamentals(ticker: str) -> dict:
     out = {"pe": None, "forward_pe": None, "peg": None, "profit_margin": None}
     try:
         info = yf.Ticker(ticker).info
-        out["pe"] = info.get("trailingPE")
-        out["forward_pe"] = info.get("forwardPE")
-        out["peg"] = info.get("pegRatio") or info.get("trailingPegRatio")
-        out["profit_margin"] = info.get("profitMargins")
+        raw = {
+            "pe": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "peg": info.get("pegRatio") or info.get("trailingPegRatio"),
+            "profit_margin": info.get("profitMargins"),
+        }
+        # yfinance sometimes returns float('nan') rather than omitting the
+        # key entirely — normalize that to None so it behaves the same as
+        # "missing" everywhere downstream (scoring, JSON serialization).
+        for k, v in raw.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                out[k] = None
+            else:
+                out[k] = v
     except Exception as e:
         print(f"  [warn] fundamentals for {ticker}: {e}")
     return out
@@ -253,12 +280,41 @@ def sb_headers():
     }
 
 
+def sanitize_for_json(rows: list[dict], table_name: str = "") -> list[dict]:
+    """
+    Replace NaN/Infinity floats with None so Supabase's PostgREST (JSON)
+    accepts the payload — json.dumps happily encodes NaN/Infinity by
+    default, but they're not valid JSON, so `requests` raises
+    InvalidJSONError before anything even hits the network.
+
+    Also logs exactly which row and field triggered the fix (using
+    ticker/symbol/run_id as the row identifier, whichever is present) so a
+    bad value can be traced back to its source — e.g. a volume ratio that
+    blew up to inf because of a zero-volume baseline — instead of just
+    silently disappearing into a None.
+    """
+    clean = []
+    for row in rows:
+        clean_row = {}
+        for k, v in row.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                identifier = row.get("ticker") or row.get("symbol") or row.get("run_id") or "?"
+                print(f"  [warn] sanitize_for_json: table={table_name or '?'} "
+                      f"row={identifier} field={k} value={v} -> None")
+                clean_row[k] = None
+            else:
+                clean_row[k] = v
+        clean.append(clean_row)
+    return clean
+
+
 def sb_insert(table: str, rows: list[dict]):
     if not SUPABASE_URL or not SUPABASE_KEY:
         print(f"  [skip] no Supabase creds — would have inserted {len(rows)} rows into {table}")
         return None
     if not rows:
         return None
+    rows = sanitize_for_json(rows, table_name=table)
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     resp = requests.post(url, headers=sb_headers(), json=rows, timeout=30)
     if resp.status_code >= 300:
