@@ -16,11 +16,6 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Load ETF holdings
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python holdings_loader.py
       - name: Run scanner
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
