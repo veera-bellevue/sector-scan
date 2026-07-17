@@ -42,6 +42,14 @@ ALERT_EMAIL_TO = os.environ.get("ALERT_EMAIL_TO", "")
 ALERT_EMAIL_FROM = os.environ.get("ALERT_EMAIL_FROM", "Sector Scan <onboarding@resend.dev>")
 UPLOAD_URL = os.environ.get("UPLOAD_URL", "")  # e.g. https://youruser.github.io/sector-scan/upload.html
 
+# Optional alternate send path: Gmail SMTP with an App Password. Unlike
+# Resend's sandbox mode (which only allows sending to your own verified
+# address until a domain is verified), authenticating as your own Gmail
+# account lets you send to any recipient immediately. If both are set,
+# this path is used instead of Resend.
+GMAIL_SENDER_EMAIL = os.environ.get("GMAIL_SENDER_EMAIL", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
+
 
 # ---------------------------------------------------------------------------
 # Indicators
@@ -555,14 +563,54 @@ def _parse_recipients(raw: str) -> list[str]:
     return recipients
 
 
+def _send_via_gmail_smtp(subject: str, html_body: str, recipients: list[str]) -> bool:
+    """Send via Gmail's SMTP server, authenticated as GMAIL_SENDER_EMAIL using
+    an App Password. No domain verification or sandbox restrictions — works
+    to any recipient immediately, since the send is authenticated as a real
+    Gmail account rather than a shared third-party sender address."""
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_SENDER_EMAIL
+    msg["To"] = ", ".join(recipients)
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+            server.login(GMAIL_SENDER_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_SENDER_EMAIL, recipients, msg.as_string())
+        print(f"  Notification email sent via Gmail SMTP to {', '.join(recipients)}.")
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"  [error] Gmail SMTP auth failed ({e}). Check GMAIL_SENDER_EMAIL is correct and "
+              f"GMAIL_APP_PASSWORD is a 16-character App Password (not your regular Gmail password) — "
+              f"generate one at https://myaccount.google.com/apppasswords (requires 2-Step Verification).")
+        return False
+    except Exception as e:
+        print(f"  [error] Gmail SMTP send failed: {e}")
+        return False
+
+
 def send_email(subject: str, html_body: str) -> bool:
     # ALERT_EMAIL_TO can be a single address or a comma-separated list
-    # (e.g. "you@gmail.com, spouse@gmail.com") — Resend's API accepts an
-    # array of recipients in one call.
+    # (e.g. "you@gmail.com, spouse@gmail.com") — both send paths below
+    # accept an array of recipients in one call.
     recipients = _parse_recipients(ALERT_EMAIL_TO)
-    if not RESEND_API_KEY or not recipients:
-        print("  [skip] no email credentials configured (RESEND_API_KEY / ALERT_EMAIL_TO) — "
+    if not recipients:
+        print("  [skip] no valid recipients configured in ALERT_EMAIL_TO — "
               "would have sent:")
+        print(f"    subject: {subject}")
+        return False
+
+    if GMAIL_SENDER_EMAIL and GMAIL_APP_PASSWORD:
+        return _send_via_gmail_smtp(subject, html_body, recipients)
+
+    if not RESEND_API_KEY:
+        print("  [skip] no email credentials configured (RESEND_API_KEY, or GMAIL_SENDER_EMAIL + "
+              "GMAIL_APP_PASSWORD) — would have sent:")
         print(f"    subject: {subject}")
         return False
     resp = requests.post(
@@ -572,7 +620,13 @@ def send_email(subject: str, html_body: str) -> bool:
         timeout=20,
     )
     if resp.status_code >= 300:
-        print(f"  [error] email send failed: {resp.status_code} {resp.text[:300]}")
+        if resp.status_code == 403 and "testing emails" in resp.text:
+            print("  [error] Resend rejected this send: your account is still in sandbox mode, which "
+                  "only allows sending to your own verified address. To email other recipients, either "
+                  "verify a domain at https://resend.com/domains and update ALERT_EMAIL_FROM to use it, "
+                  "or set GMAIL_SENDER_EMAIL + GMAIL_APP_PASSWORD to send via Gmail SMTP instead.")
+        else:
+            print(f"  [error] email send failed: {resp.status_code} {resp.text[:300]}")
         print(f"    recipients sent: {recipients}")
         return False
     print(f"  Notification email sent to {', '.join(recipients)}.")
