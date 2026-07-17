@@ -115,15 +115,43 @@ def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
     return round(float(val), 2)
 
 
+# Some tickers arrive from holdings CSVs / config in a form yfinance won't
+# resolve (e.g. Berkshire Hathaway class B shares showing up as "BRKB" with
+# no separator, when yfinance expects "BRK-B"). Rather than guess at a
+# general rule, we normalize dotted tickers (yfinance wants dashes, not
+# dots) and maintain an explicit override table for known no-separator
+# cases, since "BRKB" -> "BRK-B" can't be inferred programmatically.
+TICKER_YF_OVERRIDES = {
+    "BRKB": "BRK-B",
+    "BRK.B": "BRK-B",
+    "BFB": "BF-B",
+    "BF.B": "BF-B",
+}
+
+
+def normalize_ticker_for_yf(ticker: str) -> str:
+    """Map a ticker as it appears in our data (holdings CSV, config, DB) to
+    the symbol yfinance actually expects. Returns the input unchanged for
+    ordinary tickers."""
+    if ticker in TICKER_YF_OVERRIDES:
+        return TICKER_YF_OVERRIDES[ticker]
+    if "." in ticker:
+        return ticker.replace(".", "-")
+    return ticker
+
+
 def fetch_history(ticker: str) -> pd.DataFrame | None:
+    yf_ticker = normalize_ticker_for_yf(ticker)
     try:
-        df = yf.Ticker(ticker).history(period=LOOKBACK, interval=INTERVAL)
+        df = yf.Ticker(yf_ticker).history(period=LOOKBACK, interval=INTERVAL)
         if df.empty or len(df) < 60:
-            print(f"  [warn] not enough history for {ticker}")
+            suffix = f" (normalized to {yf_ticker})" if yf_ticker != ticker else ""
+            print(f"  [warn] not enough history for {ticker}{suffix}")
             return None
         return df
     except Exception as e:
-        print(f"  [error] fetching {ticker}: {e}")
+        suffix = f" (normalized to {yf_ticker})" if yf_ticker != ticker else ""
+        print(f"  [error] fetching {ticker}{suffix}: {e}")
         return None
 
 
@@ -160,8 +188,9 @@ def rsi_overbought_history_flag(rsi_series: pd.Series) -> int:
 
 def fetch_fundamentals(ticker: str) -> dict:
     out = {"pe": None, "forward_pe": None, "peg": None, "profit_margin": None}
+    yf_ticker = normalize_ticker_for_yf(ticker)
     try:
-        info = yf.Ticker(ticker).info
+        info = yf.Ticker(yf_ticker).info
         raw = {
             "pe": info.get("trailingPE"),
             "forward_pe": info.get("forwardPE"),
@@ -177,7 +206,8 @@ def fetch_fundamentals(ticker: str) -> dict:
             else:
                 out[k] = v
     except Exception as e:
-        print(f"  [warn] fundamentals for {ticker}: {e}")
+        suffix = f" (normalized to {yf_ticker})" if yf_ticker != ticker else ""
+        print(f"  [warn] fundamentals for {ticker}{suffix}: {e}")
     return out
 
 
@@ -589,6 +619,236 @@ def handle_missing_holdings(sector_rows: list[dict], holdings_map: dict[str, lis
 
 
 # ---------------------------------------------------------------------------
+# Plain-language investor report
+# ---------------------------------------------------------------------------
+
+def _plain_trend(trend: str) -> str:
+    return {
+        "BULL": "Uptrend — price is holding above both its short- and long-term averages, a sign of steady buying interest.",
+        "BEAR": "Downtrend — price is below both averages, a sign of persistent selling pressure.",
+        "MIXED": "Sideways / mixed — price is bouncing around its averages with no clear direction yet.",
+    }.get(trend, trend)
+
+
+def _plain_rsi(rsi: float) -> str:
+    if rsi >= RSI_OVERBOUGHT:
+        return f"Overbought (RSI {rsi}) — has moved up quickly and may be due for a pause or pullback."
+    if rsi < RSI_OVERSOLD:
+        return f"Oversold (RSI {rsi}) — has sold off quickly and may be due for a bounce."
+    if rsi >= RSI_BULL_MOMENTUM:
+        return f"Strong momentum (RSI {rsi}) — buyers clearly in control without being stretched."
+    return f"Soft / neutral momentum (RSI {rsi})."
+
+
+def _plain_volume(rel_volume, volume_surge) -> str:
+    if rel_volume is None:
+        return "Volume data not yet available."
+    if volume_surge:
+        return (f"Trading roughly {rel_volume}x its normal volume — unusually heavy activity, "
+                f"which can mean large investors are stepping in (or out).")
+    if rel_volume < 0.5:
+        return f"Trading at only {rel_volume}x its normal volume — quieter than usual, low conviction either way."
+    return f"Trading at {rel_volume}x its normal volume — a typical, unremarkable level."
+
+
+def _plain_sector_classification(classification: str) -> str:
+    return {
+        "Leading": "Near the front of the pack — strong uptrend with healthy momentum.",
+        "Lagging": "Falling behind — in a clear downtrend versus its own averages.",
+        "Stalling": "Was strong but momentum is fading — worth watching for a possible turn.",
+        "Mixed": "No clear direction right now.",
+    }.get(classification, classification)
+
+
+def _plain_regime(regime: str) -> str:
+    return {
+        "Cyclical / risk-on": ("Money is currently favoring economically-sensitive sectors over safe "
+                                "havens — a sign investors are feeling confident about growth."),
+        "Defensive rotation": ("Money is currently favoring safe-haven sectors — a sign investors "
+                                "are turning cautious."),
+        "Mixed / no clear regime": ("No dominant pattern right now — sector money flow is mixed, "
+                                     "without a clear 'risk-on' or 'risk-off' signal."),
+    }.get(regime, regime)
+
+
+def _plain_valuation(pe, forward_pe, peg) -> str:
+    if pe is None and peg is None:
+        return "Valuation data not available for this stock."
+    bits = []
+    if pe is not None:
+        bits.append(f"trades at {pe:.1f}x trailing earnings")
+    if forward_pe is not None and pe is not None:
+        if forward_pe < pe:
+            bits.append(f"expected to get cheaper on a forward basis ({forward_pe:.1f}x), "
+                        f"implying analysts expect earnings growth")
+        elif forward_pe > pe:
+            bits.append(f"expected to get more expensive on a forward basis ({forward_pe:.1f}x), "
+                        f"implying analysts expect earnings to soften")
+    if peg is not None:
+        if peg < 1:
+            bits.append(f"a PEG ratio of {peg:.2f}, generally considered inexpensive relative to its growth rate")
+        elif peg > 2:
+            bits.append(f"a PEG ratio of {peg:.2f}, generally considered expensive relative to its growth rate")
+        else:
+            bits.append(f"a PEG ratio of {peg:.2f}, roughly fair value relative to its growth rate")
+    return ("This stock " + "; ".join(bits) + ".") if bits else "Valuation data not available for this stock."
+
+
+def build_investor_report(regime: str, notes: str, bench: dict,
+                           sector_rows: list[dict], stock_rows: list[dict],
+                           top_n: int = 5) -> dict:
+    """
+    Builds a plain-language report aimed at a non-technical reader, in both
+    Markdown (for saving to a file) and HTML (for email). Everything here
+    is derived directly from this run's data — no invented numbers, and no
+    advice beyond describing what the scan found. Always includes a clear
+    'not financial advice' disclaimer.
+    """
+    today = datetime.date.today().isoformat()
+    ranked_sectors = sorted(sector_rows, key=lambda r: (r["classification"] != "Leading", r["ticker"]))
+    top_stocks = stock_rows[:top_n]
+
+    md_lines = [
+        f"# Sector Scan — Investor Report ({today})",
+        "",
+        "**This is not financial advice.** It's a plain-language summary of what today's scan found. "
+        "Always do your own research (or talk to a licensed advisor) before making any investment decision.",
+        "",
+        "## Market Mood",
+        _plain_regime(regime),
+        "",
+        f"*Behind the numbers:* {notes}",
+        "",
+        f"The overall market (S&P 500 / SPY) is priced at {bench['price']}, "
+        f"and its momentum reading (RSI) is {bench['rsi']} — "
+        f"{'stretched to the upside' if bench['rsi'] >= RSI_OVERBOUGHT else 'not stretched, i.e. room to keep moving either way'}.",
+        "",
+        "## Sectors: Where Is Money Moving?",
+        "",
+    ]
+    for row in ranked_sectors:
+        md_lines.append(
+            f"- **{row['sector_name']} ({row['ticker']})** — *{row['classification']}*: "
+            f"{_plain_sector_classification(row['classification'])}"
+        )
+    md_lines.append("")
+
+    if top_stocks:
+        md_lines.append("## Top-Ranked Stocks This Run")
+        md_lines.append("")
+        md_lines.append(
+            "These are the highest-scoring stocks from sectors currently showing strength, ranked by "
+            "a blend of trend health, valuation, and past reliability. A higher score means the data "
+            "currently looks more favorable — it is not a guarantee."
+        )
+        md_lines.append("")
+        for row in top_stocks:
+            md_lines.append(f"### #{row['rank']} {row['ticker']} — Overall Score: {row['composite_score']}/100")
+            md_lines.append(f"- **Price:** ${row['price']}")
+            md_lines.append(f"- **Trend:** {_plain_trend(row['trend'])}")
+            md_lines.append(f"- **Momentum:** {_plain_rsi(row['rsi'])}")
+            md_lines.append(f"- **Volume:** {_plain_volume(row['rel_volume'], row['volume_surge'])}")
+            md_lines.append(f"- **Valuation:** {_plain_valuation(row['pe'], row['forward_pe'], row['peg'])}")
+            steadiness = "a clean, orderly trend" if row["overbought_crossings_1y"] <= 1 else "a choppier ride, worth expecting swings"
+            md_lines.append(
+                f"- **Reliability:** has gotten overbought and pulled back {row['overbought_crossings_1y']} "
+                f"time(s) in the past year — {steadiness}."
+            )
+            md_lines.append("")
+
+        top = top_stocks[0]
+        md_lines.append("## Bottom Line")
+        md_lines.append(
+            f"Based purely on today's data, **{top['ticker']}** scored highest ({top['composite_score']}/100), "
+            f"driven mainly by {'a healthy uptrend' if top['trend'] == 'BULL' else 'its current setup'} "
+            f"and {'reasonable valuation' if top['valuation_score'] >= 50 else 'valuation that is less favorable, offset by other factors'}. "
+            "This reflects what the scan measured *today* — it says nothing about tomorrow. "
+            "Treat it as one input, not a decision."
+        )
+    else:
+        md_lines.append("## Top-Ranked Stocks This Run")
+        md_lines.append("No stocks were scored this run (no sectors currently require holdings, or holdings data is missing).")
+
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append(
+        "*Glossary — Trend: direction of price vs. its averages. Momentum (RSI): how fast/far a price "
+        "has moved recently, on a 0-100 scale. Volume: how many shares are trading vs. normal. "
+        "Valuation: how expensive a stock is relative to its earnings. Overall Score: this tool's "
+        "blend of all of the above, 0-100.*"
+    )
+    markdown = "\n".join(md_lines)
+
+    def esc(s):
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    html_parts = [f"<h1>Sector Scan — Investor Report ({today})</h1>"]
+    html_parts.append(
+        "<p><b>This is not financial advice.</b> It's a plain-language summary of what today's scan "
+        "found. Always do your own research (or talk to a licensed advisor) before making any "
+        "investment decision.</p>"
+    )
+    html_parts.append(f"<h2>Market Mood</h2><p>{esc(_plain_regime(regime))}</p>")
+    html_parts.append(f"<p><i>Behind the numbers:</i> {esc(notes)}</p>")
+    html_parts.append(
+        f"<p>The overall market (S&amp;P 500 / SPY) is priced at {bench['price']}, with a momentum "
+        f"reading (RSI) of {bench['rsi']} — "
+        f"{'stretched to the upside' if bench['rsi'] >= RSI_OVERBOUGHT else 'not stretched, i.e. room to keep moving either way'}.</p>"
+    )
+    html_parts.append("<h2>Sectors: Where Is Money Moving?</h2><ul>")
+    for row in ranked_sectors:
+        html_parts.append(
+            f"<li><b>{esc(row['sector_name'])} ({esc(row['ticker'])})</b> — <i>{esc(row['classification'])}</i>: "
+            f"{esc(_plain_sector_classification(row['classification']))}</li>"
+        )
+    html_parts.append("</ul>")
+
+    if top_stocks:
+        html_parts.append("<h2>Top-Ranked Stocks This Run</h2>")
+        html_parts.append(
+            "<p>These are the highest-scoring stocks from sectors currently showing strength, ranked "
+            "by a blend of trend health, valuation, and past reliability. A higher score means the "
+            "data currently looks more favorable — it is not a guarantee.</p>"
+        )
+        for row in top_stocks:
+            html_parts.append(f"<h3>#{row['rank']} {esc(row['ticker'])} — Overall Score: {row['composite_score']}/100</h3><ul>")
+            html_parts.append(f"<li><b>Price:</b> ${row['price']}</li>")
+            html_parts.append(f"<li><b>Trend:</b> {esc(_plain_trend(row['trend']))}</li>")
+            html_parts.append(f"<li><b>Momentum:</b> {esc(_plain_rsi(row['rsi']))}</li>")
+            html_parts.append(f"<li><b>Volume:</b> {esc(_plain_volume(row['rel_volume'], row['volume_surge']))}</li>")
+            html_parts.append(f"<li><b>Valuation:</b> {esc(_plain_valuation(row['pe'], row['forward_pe'], row['peg']))}</li>")
+            steadiness = "a clean, orderly trend" if row["overbought_crossings_1y"] <= 1 else "a choppier ride, worth expecting swings"
+            html_parts.append(
+                f"<li><b>Reliability:</b> overbought/pulled-back {row['overbought_crossings_1y']} time(s) in the "
+                f"past year — {steadiness}.</li>"
+            )
+            html_parts.append("</ul>")
+
+        top = top_stocks[0]
+        html_parts.append("<h2>Bottom Line</h2><p>")
+        html_parts.append(
+            f"Based purely on today's data, <b>{esc(top['ticker'])}</b> scored highest "
+            f"({top['composite_score']}/100), driven mainly by "
+            f"{'a healthy uptrend' if top['trend'] == 'BULL' else 'its current setup'} and "
+            f"{'reasonable valuation' if top['valuation_score'] >= 50 else 'valuation that is less favorable, offset by other factors'}. "
+            "This reflects what the scan measured <i>today</i> — it says nothing about tomorrow. "
+            "Treat it as one input, not a decision.</p>"
+        )
+    else:
+        html_parts.append("<h2>Top-Ranked Stocks This Run</h2><p>No stocks were scored this run.</p>")
+
+    html_parts.append(
+        "<hr><p style='font-size:0.85em;color:#555'><i>Glossary — Trend: direction of price vs. its "
+        "averages. Momentum (RSI): how fast/far a price has moved recently, 0-100 scale. Volume: how "
+        "many shares are trading vs. normal. Valuation: how expensive a stock is relative to earnings. "
+        "Overall Score: this tool's blend of all of the above, 0-100.</i></p>"
+    )
+    html = "\n".join(html_parts)
+
+    return {"markdown": markdown, "html": html}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -779,6 +1039,19 @@ def main():
         row["rank"] = i
 
     sb_insert("stock_scores", stock_rows)
+
+    # --- Plain-language investor report ---
+    report = build_investor_report(regime, notes, bench, sector_rows, stock_rows)
+    today_str = datetime.date.today().isoformat()
+    try:
+        os.makedirs("reports", exist_ok=True)
+        report_path = os.path.join("reports", f"{today_str}_report.md")
+        with open(report_path, "w") as f:
+            f.write(report["markdown"])
+        print(f"Investor report written to {report_path}")
+    except Exception as e:
+        print(f"  [warn] could not write local report file: {e}")
+    send_email(f"Sector Scan — Investor Report ({today_str})", report["html"])
 
     print("=== Done ===")
     for row in stock_rows:
