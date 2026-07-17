@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import json
+import re
 import base64
 import datetime
 import requests
@@ -530,8 +531,36 @@ def fetch_pending_requests() -> dict[str, str]:
     return out
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _parse_recipients(raw: str) -> list[str]:
+    """
+    Splits ALERT_EMAIL_TO on commas, strips whitespace and any stray
+    quote characters (a common artifact of pasting into a GitHub Actions
+    secret with quotes included, e.g. "you@gmail.com, spouse@gmail.com"),
+    and validates each address. Invalid entries are dropped — with a
+    printed warning naming the exact bad value — rather than silently
+    sent to Resend and rejected as a single opaque 422 for the whole batch.
+    """
+    recipients = []
+    for addr in re.split(r"[,;]", raw):
+        addr = addr.strip().strip('"').strip("'").strip()
+        if not addr:
+            continue
+        if not _EMAIL_RE.match(addr):
+            print(f"  [warn] ALERT_EMAIL_TO contains an invalid address, skipping: {addr!r}")
+            continue
+        recipients.append(addr)
+    return recipients
+
+
 def send_email(subject: str, html_body: str) -> bool:
-    if not RESEND_API_KEY or not ALERT_EMAIL_TO:
+    # ALERT_EMAIL_TO can be a single address or a comma-separated list
+    # (e.g. "you@gmail.com, spouse@gmail.com") — Resend's API accepts an
+    # array of recipients in one call.
+    recipients = _parse_recipients(ALERT_EMAIL_TO)
+    if not RESEND_API_KEY or not recipients:
         print("  [skip] no email credentials configured (RESEND_API_KEY / ALERT_EMAIL_TO) — "
               "would have sent:")
         print(f"    subject: {subject}")
@@ -539,13 +568,14 @@ def send_email(subject: str, html_body: str) -> bool:
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-        json={"from": ALERT_EMAIL_FROM, "to": [ALERT_EMAIL_TO], "subject": subject, "html": html_body},
+        json={"from": ALERT_EMAIL_FROM, "to": recipients, "subject": subject, "html": html_body},
         timeout=20,
     )
     if resp.status_code >= 300:
         print(f"  [error] email send failed: {resp.status_code} {resp.text[:300]}")
+        print(f"    recipients sent: {recipients}")
         return False
-    print("  Notification email sent.")
+    print(f"  Notification email sent to {', '.join(recipients)}.")
     return True
 
 
