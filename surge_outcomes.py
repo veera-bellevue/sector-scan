@@ -13,8 +13,8 @@ improving (Mixed/Stalling/Lagging -> Leading) within a lookforward window.
 For stocks: tracks whether a volume_surge day led to composite_score
 rising within the same window (stock_scores has no classification field).
 
-    python surge_outcomes.py                  # default 10-run lookforward
-    python surge_outcomes.py --lookforward 5   # shorter window
+    python surge_outcomes.py                  # default 10-trading-day lookforward
+    python surge_outcomes.py --lookforward 5   # shorter window (trading days)
     python surge_outcomes.py --no-email        # print only, skip sending
 
 Requires the same env vars as scan.py: SUPABASE_URL, SUPABASE_SERVICE_KEY,
@@ -72,11 +72,39 @@ def fetch_all(table: str, select: str, order: str) -> list[dict]:
 
 
 def build_run_sequence(runs: list[dict]):
-    """run_id -> sequence index (0-based, oldest first), so 'N runs later'
-    means N scan.py executions later, not N calendar days later (skips
-    weekends/holidays naturally since those are just runs that didn't happen)."""
-    ordered = sorted(runs, key=lambda r: r["run_ts"])
-    return {r["id"]: i for i, r in enumerate(ordered)}, {i: r["run_ts"] for i, r in enumerate(ordered)}
+    """run_id -> sequence index, where the index counts distinct CALENDAR
+    DAYS (UTC), not raw run rows. Multiple runs on the same day — e.g. from
+    manually re-triggering workflow_dispatch while testing — collapse onto
+    the same index, so 'lookforward=10' means 10 trading days later, not
+    'however many times the workflow happened to fire,' which would
+    silently compress the window if a day got triggered multiple times."""
+    by_date: dict[str, list[dict]] = {}
+    for r in runs:
+        date_key = r["run_ts"][:10]  # YYYY-MM-DD, UTC
+        by_date.setdefault(date_key, []).append(r)
+
+    dates_sorted = sorted(by_date.keys())
+    date_to_seq = {d: i for i, d in enumerate(dates_sorted)}
+    seq_to_date = {i: d for i, d in enumerate(dates_sorted)}
+
+    run_seq = {}
+    for date_key, day_runs in by_date.items():
+        seq = date_to_seq[date_key]
+        for r in day_runs:
+            run_seq[r["id"]] = seq
+
+    return run_seq, seq_to_date
+
+
+def dedupe_surge_events(surge_events: list[dict], run_seq: dict) -> list[dict]:
+    """Collapse multiple surge flags for the same ticker on the same day
+    (again, from repeated same-day runs) down to one — otherwise a single
+    real surge event gets counted and reported N times."""
+    latest_per_ticker_day: dict[tuple, dict] = {}
+    for ev in surge_events:
+        key = (ev["ticker"], run_seq[ev["run_id"]])
+        latest_per_ticker_day[key] = ev  # last one wins; rows arrive run_id-ascending
+    return sorted(latest_per_ticker_day.values(), key=lambda e: run_seq[e["run_id"]])
 
 
 def analyze_sectors(lookforward: int) -> list[str]:
@@ -101,8 +129,9 @@ def analyze_sectors(lookforward: int) -> list[str]:
         by_ticker.setdefault(r["ticker"], {})[seq] = r
 
     surge_events = [r for r in rows if r.get("volume_surge") and r["run_id"] in run_seq]
+    surge_events = dedupe_surge_events(surge_events, run_seq)
 
-    lines.append(f"=== SECTOR volume_surge outcomes (lookforward={lookforward} runs) ===")
+    lines.append(f"=== SECTOR volume_surge outcomes (lookforward={lookforward} trading days) ===")
     lines.append(f"Total volume_surge events found: {len(surge_events)}")
     if len(surge_events) < 10:
         lines.append("  [note] fewer than 10 events — too early for a reliable read "
@@ -141,11 +170,11 @@ def analyze_sectors(lookforward: int) -> list[str]:
     scored = improved + unchanged + worsened
     lines.append("")
     lines.append(f"Summary: {improved} improved, {unchanged} unchanged, {worsened} worsened, "
-                  f"{no_future_data} still pending ({lookforward} runs haven't elapsed yet)")
+                  f"{no_future_data} still pending ({lookforward} trading days haven't elapsed yet)")
     if scored >= 10:
         pct = round(100 * improved / scored, 1)
         lines.append(f"  -> {pct}% of surge events with enough elapsed history led to classification "
-                      f"improvement within {lookforward} runs.")
+                      f"improvement within {lookforward} trading days.")
     return lines
 
 
@@ -169,8 +198,9 @@ def analyze_stocks(lookforward: int) -> list[str]:
         by_ticker.setdefault(r["ticker"], {})[seq] = r
 
     surge_events = [r for r in rows if r.get("volume_surge") and r["run_id"] in run_seq]
+    surge_events = dedupe_surge_events(surge_events, run_seq)
 
-    lines.append(f"=== STOCK volume_surge outcomes (lookforward={lookforward} runs) ===")
+    lines.append(f"=== STOCK volume_surge outcomes (lookforward={lookforward} trading days) ===")
     lines.append(f"Total volume_surge events found: {len(surge_events)}")
 
     improved, worsened, no_future_data = 0, 0, 0
@@ -202,7 +232,7 @@ def analyze_stocks(lookforward: int) -> list[str]:
     if scored >= 10:
         pct = round(100 * improved / scored, 1)
         lines.append(f"  -> {pct}% of surge events with enough elapsed history saw composite_score rise "
-                      f"within {lookforward} runs.")
+                      f"within {lookforward} trading days.")
     return lines
 
 
@@ -236,7 +266,7 @@ def send_email(subject: str, html_body: str) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="Track outcomes of volume_surge events")
     parser.add_argument("--lookforward", type=int, default=10,
-                         help="Number of runs ahead to check for outcome (default 10)")
+                         help="Number of trading days ahead to check for outcome (default 10)")
     parser.add_argument("--no-email", action="store_true",
                          help="Print the report only, skip sending it by email")
     args = parser.parse_args()
@@ -251,7 +281,7 @@ def main():
         print(line)
 
     if not args.no_email:
-        subject = f"Sector Scan: volume surge outcomes (lookforward={args.lookforward})"
+        subject = f"Sector Scan: volume surge outcomes (lookforward={args.lookforward}d)"
         html_body = build_email_html(sector_lines, stock_lines)
         send_email(subject, html_body)
 
