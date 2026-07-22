@@ -245,15 +245,28 @@ def build_email_html(sector_lines: list[str], stock_lines: list[str]) -> str:
     )
 
 
+def _parse_recipients(raw: str) -> list[str]:
+    """Split a comma/semicolon-separated ALERT_EMAIL_TO into a clean list
+    of individual addresses. Resend rejects a single string containing
+    multiple addresses ("a@x.com,b@y.com") — it must be a real list, one
+    valid address per element. Mirrors the parsing scan.py already does
+    for its own multi-recipient send."""
+    if not raw:
+        return []
+    parts = raw.replace(";", ",").split(",")
+    return [p.strip() for p in parts if p.strip()]
+
+
 def send_email(subject: str, html_body: str) -> bool:
-    if not RESEND_API_KEY or not ALERT_EMAIL_TO:
+    recipients = _parse_recipients(ALERT_EMAIL_TO)
+    if not RESEND_API_KEY or not recipients:
         print("  [skip] no email credentials configured (RESEND_API_KEY / ALERT_EMAIL_TO) — "
               "not sending, printing to console instead.")
         return False
     resp = requests.post(
         "https://api.resend.com/emails",
         headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-        json={"from": ALERT_EMAIL_FROM, "to": [ALERT_EMAIL_TO], "subject": subject, "html": html_body},
+        json={"from": ALERT_EMAIL_FROM, "to": recipients, "subject": subject, "html": html_body},
         timeout=20,
     )
     if resp.status_code >= 300:
