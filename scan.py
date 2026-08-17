@@ -32,6 +32,7 @@ from config import (
     LOOKBACK, INTERVAL, WEIGHT_TECHNICAL, WEIGHT_VALUATION, WEIGHT_PATTERN,
     HOLDINGS_REQUIRED_FOR, RENOTIFY_AFTER_DAYS, WEIGHT_CHANGE_THRESHOLD_PTS,
     REL_VOLUME_LOOKBACK, REL_VOLUME_SURGE, UP_DOWN_VOLUME_LOOKBACK,
+    RSI_SLOPE_WINDOW,
 )
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -122,6 +123,66 @@ def compute_up_down_volume_ratio(close: pd.Series, volume: pd.Series,
     if not math.isfinite(val):
         return None
     return round(float(val), 2)
+
+
+def compute_rsi_slope(rsi_series: pd.Series, window: int = RSI_SLOPE_WINDOW) -> float | None:
+    """Linear-regression slope of RSI over the trailing `window` bars, in
+    RSI points/day. This is the leading read Veera's framework wants —
+    RSI *level* (e.g. 'RSI >= 55') is confirmatory, it only crosses a
+    threshold after a move is already underway. Slope catches momentum
+    building before it necessarily clears a level. None if there isn't
+    enough history or any input isn't finite."""
+    s = rsi_series.dropna()
+    if len(s) < window:
+        return None
+    y = s.iloc[-window:].values
+    if not np.all(np.isfinite(y)):
+        return None
+    x = np.arange(window)
+    slope = float(np.polyfit(x, y, 1)[0])
+    if not math.isfinite(slope):
+        return None
+    return round(slope, 3)
+
+
+def compute_rsi_acceleration(rsi_series: pd.Series, window: int = RSI_SLOPE_WINDOW) -> float | None:
+    """Change in RSI slope between the most recent `window`-bar window and
+    the window immediately before it — i.e. is momentum itself speeding up
+    or slowing down, not just positive. This is the second-order signal:
+    a sector can have a rising RSI slope that's decelerating (losing
+    steam) vs. one that's accelerating (building) — same slope sign, very
+    different read. None if there isn't enough history (needs 2x window)
+    or any input isn't finite."""
+    s = rsi_series.dropna()
+    if len(s) < window * 2:
+        return None
+    recent = s.iloc[-window:].values
+    prior = s.iloc[-window * 2:-window].values
+    if not (np.all(np.isfinite(recent)) and np.all(np.isfinite(prior))):
+        return None
+    x = np.arange(window)
+    recent_slope = float(np.polyfit(x, recent, 1)[0])
+    prior_slope = float(np.polyfit(x, prior, 1)[0])
+    accel = recent_slope - prior_slope
+    if not math.isfinite(accel):
+        return None
+    return round(accel, 3)
+
+
+def classify_volume_signal(day_change_pct: float | None, volume_surge: bool) -> str:
+    """Tags a volume surge as 'accumulation' (heavy volume + price up) or
+    'distribution' (heavy volume + price down). Structurally, a margin-call
+    cascade and real institutional buying look identical in raw rel_volume
+    alone — this is the split that keeps forced-selling from masquerading
+    as accumulation. 'neutral' when there's no surge, or today's price
+    change isn't available (e.g. insufficient history)."""
+    if not volume_surge or day_change_pct is None:
+        return "neutral"
+    if day_change_pct > 0:
+        return "accumulation"
+    if day_change_pct < 0:
+        return "distribution"
+    return "neutral"
 
 
 # Some tickers arrive from holdings CSVs / config in a form yfinance won't
@@ -539,6 +600,39 @@ def fetch_pending_requests() -> dict[str, str]:
     return out
 
 
+def fetch_previous_leading_indicator_flags(current_run_id: int) -> dict[str, bool]:
+    """{ticker: is_leading_indicator} from the most recent run before this
+    one, so the alert below can fire only on a sector *newly* flipping to
+    True this run — same anti-spam pattern as holding_requests, so a
+    sector that stays flagged for a week doesn't re-email you every day."""
+    prior_runs = sb_select("runs", {"select": "id", "order": "id.desc", "limit": "2"})
+    prior_ids = [r["id"] for r in prior_runs if r["id"] != current_run_id]
+    if not prior_ids:
+        return {}
+    rows = sb_select("sector_scores", {
+        "select": "ticker,is_leading_indicator",
+        "run_id": f"eq.{prior_ids[0]}",
+    })
+    return {r["ticker"]: r.get("is_leading_indicator") for r in rows}
+
+
+def leading_indicator_email_html(rows: list[dict]) -> str:
+    def item(r):
+        return (
+            f"<li><b>{r['ticker']}</b> ({r['sector_name']}) — RSI {r['rsi']} "
+            f"(slope {r['rsi_slope']:+.2f}/day, accelerating {r['rsi_acceleration']:+.2f}), "
+            f"volume {r['rel_volume']}x normal, tagged <b>accumulation</b>.</li>"
+        )
+    return f"""
+    <p>These sectors just flipped to a <b>leading-indicator</b> signal — not just
+    an RSI-level threshold, but RSI momentum that's rising <i>and accelerating</i>,
+    paired with a volume surge on an up day (not a down-day distribution surge):</p>
+    <ul>{"".join(item(r) for r in rows)}</ul>
+    <p>This is the earliest read this scanner produces. It is not a confirmation
+    signal — treat it as "start paying attention," not "enter now."</p>
+    """
+
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -811,8 +905,9 @@ def build_investor_report(regime: str, notes: str, bench: dict,
         "",
     ]
     for row in ranked_sectors:
+        flag = " 🎯 *leading indicator*" if row.get("is_leading_indicator") else ""
         md_lines.append(
-            f"- **{row['sector_name']} ({row['ticker']})** — *{row['classification']}*: "
+            f"- **{row['sector_name']} ({row['ticker']})** — *{row['classification']}*{flag}: "
             f"{_plain_sector_classification(row['classification'])}"
         )
     md_lines.append("")
@@ -881,8 +976,9 @@ def build_investor_report(regime: str, notes: str, bench: dict,
     )
     html_parts.append("<h2>Sectors: Where Is Money Moving?</h2><ul>")
     for row in ranked_sectors:
+        flag = " 🎯 <b>leading indicator</b>" if row.get("is_leading_indicator") else ""
         html_parts.append(
-            f"<li><b>{esc(row['sector_name'])} ({esc(row['ticker'])})</b> — <i>{esc(row['classification'])}</i>: "
+            f"<li><b>{esc(row['sector_name'])} ({esc(row['ticker'])})</b> — <i>{esc(row['classification'])}</i>{flag}: "
             f"{esc(_plain_sector_classification(row['classification']))}</li>"
         )
     html_parts.append("</ul>")
@@ -955,6 +1051,29 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
     up_down_volume_ratio = compute_up_down_volume_ratio(close, volume)
     volume_surge = rel_volume is not None and rel_volume >= REL_VOLUME_SURGE
 
+    # --- Leading indicator: RSI slope/acceleration + accumulation-vs-distribution ---
+    day_change_pct = None
+    if len(close) >= 2:
+        prev_close = float(close.iloc[-2])
+        if prev_close:
+            day_change_pct = round((price - prev_close) / prev_close * 100, 3)
+
+    rsi_slope = compute_rsi_slope(rsi_series)
+    rsi_acceleration = compute_rsi_acceleration(rsi_series)
+    volume_signal_type = classify_volume_signal(day_change_pct, volume_surge)
+
+    # All four have to line up: not-bearish trend, RSI slope rising, that
+    # rise itself accelerating, and the volume surge (if any) reads as
+    # buying rather than distribution. This deliberately requires more than
+    # "RSI is going up" — a rising-but-decelerating RSI, or a volume surge
+    # on a down day, does not qualify.
+    is_leading_indicator = (
+        trend != "BEAR"
+        and rsi_slope is not None and rsi_slope > 0
+        and rsi_acceleration is not None and rsi_acceleration > 0
+        and volume_signal_type == "accumulation"
+    )
+
     # --- Relative strength vs SPY (additive, doesn't change absolute classification) ---
     relative_strength_rsi = None
     outperforming_spy = None
@@ -986,6 +1105,11 @@ def analyze_ticker(ticker: str, df: pd.DataFrame | None = None,
         "rel_volume": rel_volume,
         "up_down_volume_ratio": up_down_volume_ratio,
         "volume_surge": volume_surge,
+        "day_change_pct": day_change_pct,
+        "rsi_slope": rsi_slope,
+        "rsi_acceleration": rsi_acceleration,
+        "volume_signal_type": volume_signal_type,
+        "is_leading_indicator": is_leading_indicator,
     }
 
 
@@ -1032,6 +1156,11 @@ def main():
             "rel_volume": data["rel_volume"],
             "up_down_volume_ratio": data["up_down_volume_ratio"],
             "volume_surge": data["volume_surge"],
+            "day_change_pct": data["day_change_pct"],
+            "rsi_slope": data["rsi_slope"],
+            "rsi_acceleration": data["rsi_acceleration"],
+            "volume_signal_type": data["volume_signal_type"],
+            "is_leading_indicator": data["is_leading_indicator"],
         })
         time.sleep(0.3)  # be polite to the free data source
 
@@ -1059,6 +1188,19 @@ def main():
         "notes": notes,
     }])
     sb_insert("sector_scores", sector_rows)
+
+    # --- Leading indicator alert: sectors that newly flipped this run ---
+    previous_flags = fetch_previous_leading_indicator_flags(run_id)
+    newly_flagged = [
+        r for r in sector_rows
+        if r["is_leading_indicator"] and not previous_flags.get(r["ticker"], False)
+    ]
+    if newly_flagged:
+        tickers = ", ".join(r["ticker"] for r in newly_flagged)
+        print(f"Leading indicator alert: {tickers}")
+        send_email(f"Leading indicator signal: {tickers}", leading_indicator_email_html(newly_flagged))
+    else:
+        print("No new leading-indicator flips this run.")
 
     # --- Figure out which sectors need holdings, notify if missing ---
     all_batches = fetch_all_holdings_batches()
