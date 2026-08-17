@@ -71,6 +71,14 @@ REL_VOLUME_SURGE = 1.5
 # different natural windows.
 UP_DOWN_VOLUME_LOOKBACK = 20
 
+# --- RSI slope/acceleration (leading-indicator signal) ---
+# Trailing window (trading days) used to fit a linear-regression slope to
+# RSI, and to compare that slope against the prior window of the same size
+# to get "acceleration". Kept separate from RSI_PERIOD (the RSI calculation
+# itself) since this is a second-order read on the RSI series, not the RSI
+# calculation itself.
+RSI_SLOPE_WINDOW = 5
+
 # Composite score weights (must sum to 1.0)
 WEIGHT_TECHNICAL = 0.4
 WEIGHT_VALUATION = 0.4
